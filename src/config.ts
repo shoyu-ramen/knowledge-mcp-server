@@ -19,6 +19,7 @@ export interface KnowledgeConfig {
     provider?: string;
     model?: string;
     api_key_env?: string;
+    cache_dir?: string;
   };
 }
 

@@ -10,7 +10,7 @@ import { generateEmbeddings } from "./generate-embeddings.js";
 import { initKnowledgeDir } from "./init.js";
 import { log } from "./logger.js";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 const COMMANDS = ["serve", "embeddings", "init", "validate"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -27,7 +27,7 @@ Usage: knowledge-mcp-server [command] [options]
 
 Commands:
   serve       Start the MCP server over stdio (default)
-  embeddings  Generate embeddings for all documents via Voyage AI
+  embeddings  Generate embeddings for all documents
   init        Scaffold a new knowledge/ directory with config template
   validate    Run graph integrity checks and report issues
 

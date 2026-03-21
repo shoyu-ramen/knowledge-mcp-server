@@ -1,7 +1,8 @@
 /**
- * Generate embeddings for all knowledge documents using Voyage AI.
+ * Generate embeddings for all knowledge documents.
  * Writes to <knowledge-dir>/.embeddings.json
  *
+ * Supports local (Transformers.js) and Voyage AI providers.
  * Skips documents whose content hash hasn't changed since last run.
  * Reads knowledge.config.yaml for embedding provider settings if present.
  */
@@ -11,26 +12,12 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { collectMarkdownFiles } from "./loader.js";
-
-interface EmbeddingConfig {
-  model: string;
-  apiKeyEnv: string;
-}
-
-function loadEmbeddingConfig(knowledgeDir: string): EmbeddingConfig {
-  const configPath = join(knowledgeDir, "knowledge.config.yaml");
-  try {
-    const raw = readFileSync(configPath, "utf-8");
-    const parsed = parseYaml(raw) as Record<string, unknown>;
-    const embeddings = parsed?.embeddings as Record<string, string> | undefined;
-    return {
-      model: embeddings?.model || "voyage-3-lite",
-      apiKeyEnv: embeddings?.api_key_env || "VOYAGE_API_KEY",
-    };
-  } catch {
-    return { model: "voyage-3-lite", apiKeyEnv: "VOYAGE_API_KEY" };
-  }
-}
+import {
+  type EmbeddingProvider,
+  LocalProvider,
+  VoyageProvider,
+} from "./embedding-provider.js";
+import { loadEmbeddingMeta, saveEmbeddingMeta } from "./embedding-meta.js";
 
 interface DocFrontmatter {
   id?: string;
@@ -72,35 +59,38 @@ interface DocForEmbedding {
   hash: string;
 }
 
-async function embedBatch(
-  texts: string[],
-  model: string,
-  apiKey: string
-): Promise<number[][]> {
-  const response = await fetch("https://api.voyageai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      input: texts,
-      input_type: "document",
-    }),
-  });
+function resolveProvider(knowledgeDir: string): EmbeddingProvider {
+  const configPath = join(knowledgeDir, "knowledge.config.yaml");
+  let provider: string | undefined;
+  let model: string | undefined;
+  let apiKeyEnv: string | undefined;
+  let cacheDir: string | undefined;
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Voyage AI API error (${response.status}): ${err}`);
+  try {
+    const raw = readFileSync(configPath, "utf-8");
+    const parsed = parseYaml(raw) as Record<string, unknown>;
+    const embeddings = parsed?.embeddings as Record<string, string> | undefined;
+    provider = embeddings?.provider;
+    model = embeddings?.model;
+    apiKeyEnv = embeddings?.api_key_env;
+    cacheDir = embeddings?.cache_dir;
+  } catch {
+    // No config — use defaults
   }
 
-  const data = (await response.json()) as {
-    data: Array<{ embedding: number[] }>;
-    usage: { total_tokens: number };
-  };
-  console.log(`  Batch embedded: ${texts.length} docs, ${data.usage.total_tokens} tokens`);
-  return data.data.map((d) => d.embedding);
+  if (provider === "voyage") {
+    const envVar = apiKeyEnv || "VOYAGE_API_KEY";
+    const apiKey = process.env[envVar];
+    if (!apiKey) {
+      console.error(`Error: ${envVar} environment variable is required for Voyage provider`);
+      process.exit(1);
+    }
+    return new VoyageProvider(model || "voyage-3-lite", apiKey);
+  }
+
+  // Default: local provider
+  console.log("Using local embedding model (no API key required)");
+  return new LocalProvider(model, cacheDir);
 }
 
 export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
@@ -109,18 +99,12 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
     process.exit(1);
   }
 
-  const embeddingConfig = loadEmbeddingConfig(knowledgeDir);
+  const provider = resolveProvider(knowledgeDir);
   const embeddingsPath = join(knowledgeDir, ".embeddings.json");
   const hashesPath = join(knowledgeDir, ".embeddings-hashes.json");
 
-  const apiKey = process.env[embeddingConfig.apiKeyEnv];
-  if (!apiKey) {
-    console.error(`Error: ${embeddingConfig.apiKeyEnv} environment variable is required`);
-    process.exit(1);
-  }
-
   console.log(`Knowledge dir: ${knowledgeDir}`);
-  console.log(`Embedding model: ${embeddingConfig.model}`);
+  console.log(`Embedding provider: ${provider.name} (${provider.model}, ${provider.dimensions} dims)`);
 
   // Load existing embeddings and hashes
   let existingEmbeddings: Record<string, number[]> = {};
@@ -130,6 +114,16 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
   }
   if (existsSync(hashesPath)) {
     existingHashes = JSON.parse(readFileSync(hashesPath, "utf-8"));
+  }
+
+  // Check for provider/model change — force full re-embed if mismatched
+  const meta = loadEmbeddingMeta(knowledgeDir);
+  if (meta && (meta.provider !== provider.name || meta.model !== provider.model)) {
+    console.log(
+      `Provider changed from ${meta.provider}/${meta.model} to ${provider.name}/${provider.model} — full re-embedding required`
+    );
+    existingEmbeddings = {};
+    existingHashes = {};
   }
 
   // Collect all docs
@@ -161,8 +155,8 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
     return;
   }
 
-  // Embed in batches of 20
-  const BATCH_SIZE = 20;
+  // Batch size: smaller for local (CPU-bound), larger for API
+  const BATCH_SIZE = provider.name === "local" ? 8 : 20;
   const newEmbeddings: Record<string, number[]> = { ...existingEmbeddings };
   const newHashes: Record<string, string> = { ...existingHashes };
 
@@ -172,11 +166,7 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
       `Embedding batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(toEmbed.length / BATCH_SIZE)}...`
     );
 
-    const vectors = await embedBatch(
-      batch.map((d) => d.text),
-      embeddingConfig.model,
-      apiKey
-    );
+    const vectors = await provider.embedDocuments(batch.map((d) => d.text));
     for (let j = 0; j < batch.length; j++) {
       newEmbeddings[batch[j].id] = vectors[j];
       newHashes[batch[j].id] = batch[j].hash;
@@ -195,6 +185,14 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
   // Write output
   writeFileSync(embeddingsPath, JSON.stringify(newEmbeddings));
   writeFileSync(hashesPath, JSON.stringify(newHashes));
+
+  // Write metadata sidecar
+  saveEmbeddingMeta(knowledgeDir, {
+    provider: provider.name,
+    model: provider.model,
+    dimensions: provider.dimensions,
+    createdAt: new Date().toISOString(),
+  });
 
   console.log(`\nDone! Wrote ${Object.keys(newEmbeddings).length} embeddings to ${embeddingsPath}`);
 }

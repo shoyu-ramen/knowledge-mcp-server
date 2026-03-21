@@ -30,16 +30,13 @@ Add to your `.mcp.json`:
     "knowledge": {
       "type": "stdio",
       "command": "npx",
-      "args": ["knowledge-mcp-server", "--knowledge-dir", "./knowledge"],
-      "env": {
-        "VOYAGE_API_KEY": "${VOYAGE_API_KEY}"
-      }
+      "args": ["knowledge-mcp-server", "--knowledge-dir", "./knowledge"]
     }
   }
 }
 ```
 
-The `VOYAGE_API_KEY` is optional — without it, the server uses BM25 full-text search only. With it, search results are improved via hybrid BM25 + vector scoring with Reciprocal Rank Fusion.
+By default, the server uses a local embedding model (`Xenova/all-MiniLM-L6-v2`) for hybrid BM25 + vector search — no API keys required. The model is downloaded automatically on first use (~23MB).
 
 ## CLI Reference
 
@@ -48,7 +45,7 @@ knowledge-mcp-server [command] [options]
 
 Commands:
   serve       Start the MCP server over stdio (default)
-  embeddings  Generate embeddings for all documents via Voyage AI
+  embeddings  Generate embeddings for all documents
   init        Scaffold a new knowledge/ directory with config template
   validate    Run graph integrity checks and report issues
 
@@ -61,10 +58,14 @@ Options:
 ### Generate Embeddings
 
 ```bash
+# Local model (default, no API key needed)
+npx knowledge-mcp-server embeddings
+
+# Or with Voyage AI (requires config + API key)
 VOYAGE_API_KEY=your-key npx knowledge-mcp-server embeddings
 ```
 
-Uses incremental hashing — only re-embeds documents whose content has changed.
+Uses incremental hashing — only re-embeds documents whose content has changed. Automatically detects provider/model changes and re-embeds all documents when switching.
 
 ### Validate Graph
 
@@ -177,11 +178,17 @@ synonyms:
   ai: ["artificial intelligence"]
   dkt: ["deep knowledge tracing"]
 
-# Embedding configuration
+# Embedding configuration (local model by default, no API key needed)
 embeddings:
-  provider: "voyage"
-  model: "voyage-3-lite"
-  api_key_env: "VOYAGE_API_KEY"
+  provider: "local"                   # "local" (default) or "voyage"
+  model: "Xenova/all-MiniLM-L6-v2"   # local model (384 dims)
+  # cache_dir: "~/.cache/my-models"  # optional model cache override
+
+# To use Voyage AI instead:
+# embeddings:
+#   provider: "voyage"
+#   model: "voyage-3-lite"
+#   api_key_env: "VOYAGE_API_KEY"
 ```
 
 ## Search Architecture
@@ -190,14 +197,15 @@ The search pipeline uses a 4-stage hybrid approach:
 
 1. **Query Classification** — extracts domains, phases, and query type from natural language
 2. **Metadata Pre-filter** — O(1) lookups via in-memory indices (domain, phase, tag, type)
-3. **Hybrid Scoring** — BM25 full-text search (k1=1.2, b=0.75, title 3x boost) + optional Voyage AI vector embeddings, merged via Reciprocal Rank Fusion (RRF, k=60)
+3. **Hybrid Scoring** — BM25 full-text search (k1=1.2, b=0.75, title 3x boost) + vector embeddings (local or Voyage AI), merged via Reciprocal Rank Fusion (RRF, k=60)
 4. **Hierarchical Expansion** — includes ancestor documents and cross-references within a word budget
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VOYAGE_API_KEY` | No | Voyage AI API key for semantic embeddings |
+| `VOYAGE_API_KEY` | No | Voyage AI API key (only when `provider: "voyage"` is configured) |
+| `TRANSFORMERS_CACHE` | No | Override cache directory for local embedding model files |
 | `LOG_LEVEL` | No | Logging verbosity: `debug`, `info` (default), `warn`, `error` |
 
 ## License

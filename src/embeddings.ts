@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { KnowledgeDocument } from "./loader.js";
 import { log } from "./logger.js";
+import { getEmbeddingProvider } from "./embedding-provider.js";
 
 export interface EmbeddingsStore {
   vectors: Map<string, number[]>;
@@ -25,6 +26,7 @@ export function loadEmbeddings(knowledgeDir: string): EmbeddingsStore {
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
   let dot = 0;
   let normA = 0;
   let normB = 0;
@@ -46,15 +48,16 @@ function normalizeQuery(q: string): string {
   return q.toLowerCase().trim().replace(/\s+/g, " ");
 }
 
-// --- Exponential backoff for Voyage API failures ---
+// --- Exponential backoff for remote API failures ---
 
 let backoffUntil = 0;
 let backoffMs = 0;
-const BACKOFF_MAX = 60_000;
+const BACKOFF_MAX_REMOTE = 60_000;
+const BACKOFF_MAX_LOCAL = 5_000;
 
 export async function embedQuery(query: string): Promise<number[] | null> {
-  const apiKey = process.env.VOYAGE_API_KEY;
-  if (!apiKey) return null;
+  const provider = getEmbeddingProvider();
+  if (!provider) return null;
 
   const key = normalizeQuery(query);
   const cached = queryCache.get(key);
@@ -65,41 +68,19 @@ export async function embedQuery(query: string): Promise<number[] | null> {
     return cached;
   }
 
-  // Check backoff
-  if (Date.now() < backoffUntil) {
+  // Check backoff (only applies to remote providers, but harmless for local)
+  if (provider.name === "voyage" && Date.now() < backoffUntil) {
     log.debug("embed_query_backoff", { remainingMs: backoffUntil - Date.now() });
     return null;
   }
 
   try {
-    const response = await fetch("https://api.voyageai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "voyage-3-lite",
-        input: [query],
-        input_type: "query",
-      }),
-    });
-
-    if (!response.ok) {
-      log.warn("embed_query_failed", { status: response.status, statusText: response.statusText });
-      backoffMs = Math.min(backoffMs === 0 ? 1000 : backoffMs * 2, BACKOFF_MAX);
-      backoffUntil = Date.now() + backoffMs;
-      return null;
-    }
+    const vector = await provider.embedQuery(query);
 
     // Reset backoff on success
     backoffMs = 0;
     backoffUntil = 0;
 
-    const data = (await response.json()) as {
-      data: Array<{ embedding: number[] }>;
-    };
-    const vector = data.data[0]?.embedding ?? null;
     if (vector) {
       // Evict oldest if at capacity
       if (queryCache.size >= CACHE_MAX) {
@@ -111,7 +92,8 @@ export async function embedQuery(query: string): Promise<number[] | null> {
     return vector;
   } catch (err) {
     log.warn("embed_query_error", { error: String(err) });
-    backoffMs = Math.min(backoffMs === 0 ? 1000 : backoffMs * 2, BACKOFF_MAX);
+    const maxBackoff = provider.name === "voyage" ? BACKOFF_MAX_REMOTE : BACKOFF_MAX_LOCAL;
+    backoffMs = Math.min(backoffMs === 0 ? 1000 : backoffMs * 2, maxBackoff);
     backoffUntil = Date.now() + backoffMs;
     return null;
   }
@@ -526,42 +508,20 @@ export async function embedSingleDocument(
   knowledgeDir: string,
   doc: KnowledgeDocument
 ): Promise<void> {
-  const apiKey = process.env.VOYAGE_API_KEY;
-  if (!apiKey) return;
+  const provider = getEmbeddingProvider();
+  if (!provider) return;
 
   // Respect backoff for document embedding too
-  if (Date.now() < backoffUntil) return;
+  if (provider.name === "voyage" && Date.now() < backoffUntil) return;
 
   try {
     const text = `${doc.title}\n${doc.tags.join(", ")}\n${doc.contentBody}`;
-    const response = await fetch("https://api.voyageai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "voyage-3-lite",
-        input: [text],
-        input_type: "document",
-      }),
-    });
-
-    if (!response.ok) {
-      log.warn("embed_doc_failed", { id: doc.id, status: response.status });
-      backoffMs = Math.min(backoffMs === 0 ? 1000 : backoffMs * 2, BACKOFF_MAX);
-      backoffUntil = Date.now() + backoffMs;
-      return;
-    }
+    const vectors = await provider.embedDocuments([text]);
+    const vector = vectors[0];
+    if (!vector) return;
 
     backoffMs = 0;
     backoffUntil = 0;
-
-    const data = (await response.json()) as {
-      data: Array<{ embedding: number[] }>;
-    };
-    const vector = data.data[0]?.embedding;
-    if (!vector) return;
 
     embeddingsStore.vectors.set(doc.id, vector);
     embeddingsStore.available = true;
@@ -569,7 +529,8 @@ export async function embedSingleDocument(
     log.debug("embed_doc", { id: doc.id });
   } catch (err) {
     log.warn("embed_doc_error", { id: doc.id, error: String(err) });
-    backoffMs = Math.min(backoffMs === 0 ? 1000 : backoffMs * 2, BACKOFF_MAX);
+    const maxBackoff = provider.name === "voyage" ? BACKOFF_MAX_REMOTE : BACKOFF_MAX_LOCAL;
+    backoffMs = Math.min(backoffMs === 0 ? 1000 : backoffMs * 2, maxBackoff);
     backoffUntil = Date.now() + backoffMs;
   }
 }

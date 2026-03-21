@@ -18,6 +18,7 @@ import type { KnowledgeDocument } from "./loader.js";
 import { log } from "./logger.js";
 import { loadConfig, getEffectiveDomains, getEffectivePhaseIds, type KnowledgeConfig } from "./config.js";
 import { buildClassifierConfig } from "./query-classifier.js";
+import { initEmbeddingProvider } from "./embedding-provider.js";
 
 // --- Fuzzy ID matching for knowledge_lookup ---
 function fuzzyMatchId(
@@ -65,6 +66,7 @@ export interface KnowledgeServerResult {
 export function createKnowledgeServer(knowledgeDir: string): KnowledgeServerResult {
   const start = Date.now();
   const config = loadConfig(knowledgeDir);
+  initEmbeddingProvider(config?.embeddings);
   const validDomains = getEffectiveDomains(config, knowledgeDir);
   const validPhaseIds = getEffectivePhaseIds(config);
   const graph = buildGraph(knowledgeDir, validDomains);

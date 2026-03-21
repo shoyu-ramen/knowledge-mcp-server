@@ -323,7 +323,7 @@ export function formatWriteResult(result: {
     `  Parent: ${result.parentId ?? "(root)"}`,
     ``,
     `BM25 search index updated — document is immediately searchable.`,
-    `Note: Embedding vectors update automatically when VOYAGE_API_KEY is set.`,
+    `Note: Embedding vectors update automatically using the configured embedding provider.`,
   ];
   if (result.warnings && result.warnings.length > 0) {
     lines.push(``);

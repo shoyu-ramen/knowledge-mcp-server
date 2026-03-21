@@ -29,6 +29,13 @@ const CONFIG_TEMPLATE = `# Knowledge graph configuration
 #   ai: ["artificial intelligence"]
 
 # Embedding configuration (optional, enables semantic search):
+# Default: local model (no API key needed, runs in-process)
+# embeddings:
+#   provider: "local"                    # "local" (default) or "voyage"
+#   model: "Xenova/all-MiniLM-L6-v2"    # local model name
+#   # cache_dir: "~/.cache/my-models"   # optional model cache override
+#
+# To use Voyage AI instead:
 # embeddings:
 #   provider: "voyage"
 #   model: "voyage-3-lite"
