@@ -7,7 +7,7 @@ Provides 8 tools via [Model Context Protocol](https://modelcontextprotocol.io/):
 ## Quick Start
 
 ```bash
-# Initialize a new knowledge directory
+# Initialize a new knowledge directory (also creates .mcp.json for Claude Code)
 npx knowledge-mcp-server init
 
 # Start the MCP server
@@ -22,7 +22,7 @@ npm install knowledge-mcp-server
 
 ## Claude Code Integration
 
-Add to your `.mcp.json`:
+Running `npx knowledge-mcp-server init` automatically creates a `.mcp.json` file in your project root, registering the server with Claude Code. If you need to configure it manually, add to your `.mcp.json`:
 
 ```json
 {

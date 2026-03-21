@@ -10,7 +10,7 @@ import { generateEmbeddings } from "./generate-embeddings.js";
 import { initKnowledgeDir } from "./init.js";
 import { log } from "./logger.js";
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
 const COMMANDS = ["serve", "embeddings", "init", "validate"] as const;
 type Command = (typeof COMMANDS)[number];
@@ -103,7 +103,7 @@ async function main(): Promise<void> {
       await generateEmbeddings(knowledgeDir);
       break;
     case "init":
-      initKnowledgeDir(knowledgeDir);
+      initKnowledgeDir(knowledgeDir, process.cwd());
       break;
     case "validate":
       validate(knowledgeDir);
