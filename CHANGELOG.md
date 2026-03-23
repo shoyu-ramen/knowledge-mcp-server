@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.4.0
+
+### Added
+- BM25 index caching (`.bm25-cache.json`) — skips expensive index rebuilds on startup when documents haven't changed
+- Extracted text processing module — lightweight suffix stemmer (18 rules), 220+ stopwords, compound-term-aware tokenizer (`src/text.ts`)
+- Graph export in Mermaid and DOT/Graphviz formats via `export` CLI command
+- Search analytics logging to `.search-analytics.jsonl` and `analytics` CLI command for usage summaries
+- Structured search results via `knowledgeSearchStructured()` for programmatic consumers
+- MMR (Maximal Marginal Relevance) diversification to reduce near-duplicate search results
+- New query types: `procedural` and `troubleshooting` with keyword-based classification
+- Async document loading (`loadDocumentsAsync()`) with configurable concurrency for large knowledge bases
+- BM25 tuning parameters in `knowledge.config.yaml` (`bm25.k1`, `bm25.b`)
+- Config structural validation with non-fatal warnings (`validateConfig()`)
+- CLI `search` command with `--phase`, `--tags`, `--json` options
+- Shared index-ops module (`src/index-ops.ts`) eliminating duplicated index mutation code across engine, writer, and tests
+- Centralized constants module (`src/constants.ts`) for `ID_PATTERN`, `VALID_TYPES`, `VERSION`
+- `filePathIndex` on `KnowledgeGraph` for O(1) file-path-to-docId lookups (file watcher support)
+- File watcher integration tests (`test/file-watcher.test.ts`)
+
+### Changed
+- Embeddings now use `Float32Array` instead of `number[]` for memory efficiency
+- Staleness penalty uses log-decay formula instead of binary 6-month threshold
+- BM25 scoring extracted to dedicated module (`src/bm25.ts`) with per-field weighting (title 3×, tags 2×, body 1×)
+- `TfIdfIndex` renamed to `Bm25Index` throughout (backward-compatible re-exports preserved)
+
 ## 1.3.0
 
 ### Added

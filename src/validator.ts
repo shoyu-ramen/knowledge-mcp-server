@@ -1,17 +1,18 @@
 import type { KnowledgeGraph } from "./graph.js";
+import { SIX_MONTHS_MS } from "./constants.js";
 
 export interface ValidationReport {
   orphans: string[];
   brokenRelated: Array<{ doc: string; ref: string }>;
   brokenChildren: Array<{ doc: string; ref: string }>;
+  asymmetricRelated: Array<{ doc: string; ref: string }>;
   circularParents: string[];
   noTags: string[];
   emptySummaries: string[];
   staleDocs: string[];
   embeddingCoverage: { total: number; covered: number; percent: number };
+  loaderWarnings: string[];
 }
-
-const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
 
 export function validateGraph(graph: KnowledgeGraph): ValidationReport {
   const now = Date.now();
@@ -19,11 +20,13 @@ export function validateGraph(graph: KnowledgeGraph): ValidationReport {
     orphans: [],
     brokenRelated: [],
     brokenChildren: [],
+    asymmetricRelated: [],
     circularParents: [],
     noTags: [],
     emptySummaries: [],
     staleDocs: [],
     embeddingCoverage: { total: 0, covered: 0, percent: 0 },
+    loaderWarnings: graph.loaderWarnings ?? [],
   };
 
   for (const doc of graph.documents.values()) {
@@ -36,6 +39,14 @@ export function validateGraph(graph: KnowledgeGraph): ValidationReport {
     for (const ref of doc.related) {
       if (!graph.documents.has(ref)) {
         report.brokenRelated.push({ doc: doc.id, ref });
+      }
+    }
+
+    // Asymmetric related references: A→B exists but B→A does not
+    for (const ref of doc.related) {
+      const targetDoc = graph.documents.get(ref);
+      if (targetDoc && !targetDoc.related.includes(doc.id)) {
+        report.asymmetricRelated.push({ doc: doc.id, ref });
       }
     }
 
@@ -111,6 +122,10 @@ export function formatValidationReport(report: ValidationReport): string {
     report.brokenRelated.map((r) => `${r.doc} → ${r.ref}`)
   );
   addSection(
+    "Asymmetric related references",
+    report.asymmetricRelated.map((r) => `${r.doc} → ${r.ref} (not reciprocated)`)
+  );
+  addSection(
     "Broken children references",
     report.brokenChildren.map((r) => `${r.doc} → ${r.ref}`)
   );
@@ -118,6 +133,10 @@ export function formatValidationReport(report: ValidationReport): string {
   addSection("Documents with no tags", report.noTags);
   addSection("Empty summary nodes (no children)", report.emptySummaries);
   addSection("Stale documents (>6 months)", report.staleDocs);
+
+  if (report.loaderWarnings.length > 0) {
+    addSection("Loader warnings", report.loaderWarnings);
+  }
 
   lines.push("");
   lines.push(

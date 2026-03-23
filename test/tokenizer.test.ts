@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tokenize } from "../src/embeddings.js";
+import { tokenize } from "../src/text.js";
 
 describe("tokenize", () => {
   it("tokenizes basic text into lowercase tokens", () => {

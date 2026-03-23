@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { bm25Score, buildTfIdfIndex, updateBm25Index, type Bm25Index } from "../src/embeddings.js";
+import { bm25Score, buildTfIdfIndex, updateBm25Index, type Bm25Index } from "../src/bm25.js";
 import { makeDoc, makeBm25Index } from "./helpers.js";
 
 describe("BM25 scoring", () => {

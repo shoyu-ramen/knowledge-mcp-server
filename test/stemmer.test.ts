@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tokenize } from "../src/embeddings.js";
+import { tokenize } from "../src/text.js";
 
 // The stem function is private, so we test it indirectly via tokenize
 // which includes both original and stemmed forms

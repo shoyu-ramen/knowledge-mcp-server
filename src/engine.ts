@@ -1,16 +1,10 @@
-import { watch, type FSWatcher } from "node:fs";
+import { watch, readdirSync, statSync, type FSWatcher } from "node:fs";
 import { existsSync } from "node:fs";
 import { join, resolve, relative } from "node:path";
 import { buildGraph, getAncestors, getRelated, loadTagTaxonomy } from "./graph.js";
-import { knowledgeSearch } from "./search.js";
-import {
-  buildTfIdfIndex,
-  updateBm25Index,
-  loadEmbeddings,
-  embedSingleDocument,
-  removeEmbedding,
-  type Bm25Index,
-} from "./embeddings.js";
+import { knowledgeSearch, type SearchOptions } from "./search.js";
+import { loadEmbeddings, embedSingleDocument, removeEmbedding } from "./embeddings.js";
+import { buildTfIdfIndex, updateBm25Index, configureBm25, type Bm25Index } from "./bm25.js";
 import {
   writeDocument,
   deleteDocument,
@@ -31,21 +25,17 @@ import {
   type KnowledgeConfig,
 } from "./config.js";
 import { buildClassifierConfig, type ClassifierConfig } from "./query-classifier.js";
-import { initEmbeddingProvider } from "./embedding-provider.js";
-import type { DetailLevel } from "./formatter.js";
+import { initEmbeddingProvider, type EmbeddingProvider } from "./embedding-provider.js";
+import { addToIndices, removeFromIndices } from "./index-ops.js";
+import { computeDocHash, loadBm25Cache, saveBm25Cache } from "./bm25-cache.js";
 
-// --- Public types for engine consumers ---
-
-export interface SearchOptions {
-  query: string;
-  domains?: string[];
-  phases?: number[];
-  tags?: string[];
-  type?: string;
-  maxResults?: number;
-  detailLevel?: DetailLevel;
-  includeDrafts?: boolean;
+export interface EngineOptions {
+  /** Override the embedding provider (skips singleton initialization). */
+  embeddingProvider?: EmbeddingProvider;
 }
+
+// Re-export SearchOptions for public API consumers
+export type { SearchOptions } from "./search.js";
 
 export interface LookupOptions {
   includeAncestors?: boolean;
@@ -117,25 +107,45 @@ export class KnowledgeEngine {
   private tfidfIndex: Bm25Index;
   private classifierConfig: ClassifierConfig;
   private writeQueue: Promise<unknown> = Promise.resolve();
-  private watcher: FSWatcher | null = null;
+  private watchers: FSWatcher[] = [];
   private watchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingChanges = new Map<string, "change" | "delete">();
+  private embeddingLock: Promise<void> = Promise.resolve();
 
-  constructor(knowledgeDir: string) {
+  constructor(knowledgeDir: string, options?: EngineOptions) {
     this.knowledgeDir = knowledgeDir;
     const start = Date.now();
     this.config = loadConfig(knowledgeDir);
-    initEmbeddingProvider(this.config?.embeddings);
+
+    // Embedding provider: use injected provider or initialize singleton
+    if (options?.embeddingProvider) {
+      initEmbeddingProvider(undefined, options.embeddingProvider);
+    } else {
+      initEmbeddingProvider(this.config?.embeddings);
+    }
+
+    if (this.config?.bm25) configureBm25(this.config.bm25);
     this.validDomains = getEffectiveDomains(this.config, knowledgeDir);
     this.validPhaseIds = getEffectivePhaseIds(this.config);
     this.graph = buildGraph(knowledgeDir, this.validDomains);
-    this.tfidfIndex = buildTfIdfIndex(this.graph.documents);
+
+    // Try loading cached BM25 index before expensive rebuild
+    const docHash = computeDocHash(this.graph.documents);
+    const cached = loadBm25Cache(knowledgeDir, docHash);
+    if (cached) {
+      this.tfidfIndex = cached;
+    } else {
+      this.tfidfIndex = buildTfIdfIndex(this.graph.documents);
+      saveBm25Cache(knowledgeDir, this.tfidfIndex, docHash);
+    }
+
     this.classifierConfig = buildClassifierConfig(this.config);
     const elapsed = Date.now() - start;
     log.info("startup", {
       docs: this.graph.documents.size,
       embeddings: this.graph.embeddings.vectors.size,
       embeddingsAvailable: this.graph.embeddings.available,
+      bm25Cached: !!cached,
       ms: elapsed,
     });
   }
@@ -156,7 +166,8 @@ export class KnowledgeEngine {
         detailLevel: options.detailLevel,
         includeDrafts: options.includeDrafts,
       },
-      this.classifierConfig
+      this.classifierConfig,
+      this.knowledgeDir
     );
   }
 
@@ -341,6 +352,65 @@ export class KnowledgeEngine {
     return previewDelete(this.graph, id);
   }
 
+  /** Write multiple documents in sequence, sharing a single queue slot. */
+  async bulkWrite(paramsList: WriteParams[]): Promise<WriteResult[]> {
+    return this.enqueueWrite(async () => {
+      const results: WriteResult[] = [];
+      for (const params of paramsList) {
+        const result = writeDocument(
+          this.graph,
+          this.tfidfIndex,
+          this.knowledgeDir,
+          params,
+          this.validDomains,
+          this.validPhaseIds
+        );
+        this.tfidfIndex = result.tfidfIndex;
+        results.push(result);
+      }
+      log.info("bulk_write", { count: paramsList.length });
+      return results;
+    });
+  }
+
+  /** Detect knowledge gaps: sparse domains, missing cross-links, underserved tags. */
+  detectGaps(): {
+    sparseDomains: Array<{ domain: string; count: number }>;
+    isolatedClusters: string[];
+    underTagged: string[];
+  } {
+    const domainCounts = new Map<string, number>();
+    const isolatedClusters: string[] = [];
+    const underTagged: string[] = [];
+
+    for (const doc of this.graph.documents.values()) {
+      domainCounts.set(doc.domain, (domainCounts.get(doc.domain) || 0) + 1);
+
+      // Isolated: no related links in or out
+      const backlinks = this.graph.backlinkIndex.get(doc.id);
+      if (
+        doc.related.length === 0 &&
+        (!backlinks || backlinks.size === 0) &&
+        doc.type !== "summary"
+      ) {
+        isolatedClusters.push(doc.id);
+      }
+
+      // Under-tagged: fewer than 2 tags
+      if (doc.tags.length < 2 && doc.type !== "summary") {
+        underTagged.push(doc.id);
+      }
+    }
+
+    // Sparse domains: fewer than 3 docs
+    const sparseDomains = [...domainCounts.entries()]
+      .filter(([, count]) => count < 3)
+      .map(([domain, count]) => ({ domain, count }))
+      .sort((a, b) => a.count - b.count);
+
+    return { sparseDomains, isolatedClusters, underTagged };
+  }
+
   // --- Internal ---
 
   /** @internal Exposed for backward compatibility */
@@ -358,46 +428,85 @@ export class KnowledgeEngine {
 
   /** Start watching the knowledge directory for external file changes. */
   watch(): void {
-    if (this.watcher) return;
+    if (this.watchers.length > 0) return;
+
+    const handler = (eventType: string, filename: string | null) => {
+      if (!filename) return;
+      const fullPath = resolve(this.knowledgeDir, filename);
+
+      // Determine change type
+      if (filename.endsWith(".md")) {
+        const exists = existsSync(fullPath);
+        this.pendingChanges.set(fullPath, exists ? "change" : "delete");
+      } else if (filename === ".embeddings.json") {
+        this.pendingChanges.set(fullPath, "change");
+      } else if (filename === ".tags.json") {
+        this.pendingChanges.set(fullPath, "change");
+      } else {
+        return; // Ignore other files
+      }
+
+      // Debounce: process after 500ms of quiet
+      if (this.watchDebounceTimer) clearTimeout(this.watchDebounceTimer);
+      this.watchDebounceTimer = setTimeout(() => {
+        this.watchDebounceTimer = null;
+        this.processPendingChanges();
+      }, 500);
+    };
+
     try {
-      this.watcher = watch(this.knowledgeDir, { recursive: true }, (eventType, filename) => {
-        if (!filename) return;
-        const fullPath = resolve(this.knowledgeDir, filename);
-
-        // Determine change type
-        if (filename.endsWith(".md")) {
-          const exists = existsSync(fullPath);
-          this.pendingChanges.set(fullPath, exists ? "change" : "delete");
-        } else if (filename === ".embeddings.json") {
-          this.pendingChanges.set(fullPath, "change");
-        } else if (filename === ".tags.json") {
-          this.pendingChanges.set(fullPath, "change");
-        } else {
-          return; // Ignore other files
-        }
-
-        // Debounce: process after 500ms of quiet
-        if (this.watchDebounceTimer) clearTimeout(this.watchDebounceTimer);
-        this.watchDebounceTimer = setTimeout(() => {
-          this.watchDebounceTimer = null;
-          this.processPendingChanges();
-        }, 500);
-      });
-
-      // Unref so the watcher doesn't keep the process alive
-      this.watcher.unref();
+      // Try recursive watcher (supported on macOS and Windows, Node 20+)
+      const watcher = watch(this.knowledgeDir, { recursive: true }, handler);
+      watcher.unref();
+      this.watchers.push(watcher);
       log.info("file_watcher_started", { dir: this.knowledgeDir });
-    } catch (err) {
-      log.warn("file_watcher_error", { error: String(err) });
+    } catch {
+      // Fallback for Linux: watch each directory individually
+      try {
+        this.watchDirectoriesRecursive(this.knowledgeDir, handler);
+        log.info("file_watcher_started", { dir: this.knowledgeDir, mode: "per-directory" });
+      } catch (err) {
+        log.warn("file_watcher_error", { error: String(err) });
+      }
+    }
+  }
+
+  private watchDirectoriesRecursive(
+    dir: string,
+    handler: (eventType: string, filename: string | null) => void
+  ): void {
+    const watcher = watch(dir, (eventType, filename) => {
+      if (!filename) return;
+      // Convert to relative path from knowledgeDir
+      const relFromKnowledge = relative(this.knowledgeDir, join(dir, filename));
+      handler(eventType, relFromKnowledge);
+    });
+    watcher.unref();
+    this.watchers.push(watcher);
+
+    try {
+      for (const entry of readdirSync(dir)) {
+        if (entry.startsWith(".")) continue;
+        const fullPath = join(dir, entry);
+        try {
+          if (statSync(fullPath).isDirectory()) {
+            this.watchDirectoriesRecursive(fullPath, handler);
+          }
+        } catch {
+          // Skip inaccessible entries
+        }
+      }
+    } catch {
+      // Skip unreadable directories
     }
   }
 
   /** Stop watching for file changes. */
   close(): void {
-    if (this.watcher) {
-      this.watcher.close();
-      this.watcher = null;
+    for (const watcher of this.watchers) {
+      watcher.close();
     }
+    this.watchers = [];
     if (this.watchDebounceTimer) {
       clearTimeout(this.watchDebounceTimer);
       this.watchDebounceTimer = null;
@@ -434,11 +543,14 @@ export class KnowledgeEngine {
   }
 
   private reloadEmbeddings(): void {
-    const newEmbeddings = loadEmbeddings(this.knowledgeDir);
-    this.graph.embeddings.vectors = newEmbeddings.vectors;
-    this.graph.embeddings.available = newEmbeddings.available;
-    this.graph.embeddings.normalized = newEmbeddings.normalized;
-    log.info("embeddings_reloaded", { count: newEmbeddings.vectors.size });
+    // Acquire embedding lock to prevent race with concurrent embedSingleDocument
+    this.embeddingLock = this.embeddingLock.then(() => {
+      const newEmbeddings = loadEmbeddings(this.knowledgeDir);
+      this.graph.embeddings.vectors = newEmbeddings.vectors;
+      this.graph.embeddings.available = newEmbeddings.available;
+      this.graph.embeddings.normalized = newEmbeddings.normalized;
+      log.info("embeddings_reloaded", { count: newEmbeddings.vectors.size });
+    });
   }
 
   private handleFileChanged(fullPath: string): void {
@@ -449,12 +561,14 @@ export class KnowledgeEngine {
 
     // Remove old indices if updating
     if (oldDoc) {
-      this.removeFromIndices(oldDoc);
+      removeFromIndices(this.graph, oldDoc);
+      this.graph.filePathIndex.delete(oldDoc.filePath);
     }
 
     // Add to graph and indices
     this.graph.documents.set(doc.id, doc);
-    this.addToIndices(doc);
+    addToIndices(this.graph, doc);
+    this.graph.filePathIndex.set(doc.filePath, doc.id);
 
     // Update parent's children
     if (doc.parentId) {
@@ -467,29 +581,30 @@ export class KnowledgeEngine {
     // Update BM25 index
     updateBm25Index(this.tfidfIndex, doc.id, doc);
 
-    // Fire-and-forget embedding
-    embedSingleDocument(this.graph.embeddings, this.knowledgeDir, doc).catch(() => {});
+    // Fire-and-forget embedding (sequenced through lock to prevent race with reloadEmbeddings)
+    this.embeddingLock = this.embeddingLock.then(() =>
+      embedSingleDocument(this.graph.embeddings, this.knowledgeDir, doc).catch((err) => {
+        log.warn("embed_doc_fire_and_forget", { id: doc.id, error: String(err) });
+      })
+    );
 
     log.info("file_change_detected", { id: doc.id, action: oldDoc ? "updated" : "created" });
   }
 
   private handleFileDeleted(fullPath: string): void {
-    // Find the doc that was at this path
+    // O(1) lookup via filePathIndex
     const relPath = relative(join(this.knowledgeDir, ".."), fullPath);
-    let docId: string | null = null;
-    for (const [id, doc] of this.graph.documents) {
-      if (doc.filePath === relPath) {
-        docId = id;
-        break;
-      }
-    }
+    const docId = this.graph.filePathIndex.get(relPath) ?? null;
     if (!docId) return;
 
     const doc = this.graph.documents.get(docId);
     if (!doc) return;
 
+    // Remove from filePathIndex
+    this.graph.filePathIndex.delete(relPath);
+
     // Remove from indices
-    this.removeFromIndices(doc);
+    removeFromIndices(this.graph, doc);
 
     // Remove from parent's children
     if (doc.parentId) {
@@ -512,62 +627,5 @@ export class KnowledgeEngine {
     removeEmbedding(this.graph.embeddings, this.knowledgeDir, docId);
 
     log.info("file_change_detected", { id: docId, action: "deleted" });
-  }
-
-  private removeFromIndices(doc: KnowledgeDocument): void {
-    for (const tag of doc.tags) {
-      const tagSet = this.graph.tagIndex.get(tag.toLowerCase());
-      if (tagSet) {
-        tagSet.delete(doc.id);
-        if (tagSet.size === 0) this.graph.tagIndex.delete(tag.toLowerCase());
-      }
-    }
-    const domainSet = this.graph.domainIndex.get(doc.domain.toLowerCase());
-    if (domainSet) {
-      domainSet.delete(doc.id);
-      if (domainSet.size === 0) this.graph.domainIndex.delete(doc.domain.toLowerCase());
-    }
-    for (const phase of doc.phase) {
-      const phaseSet = this.graph.phaseIndex.get(phase);
-      if (phaseSet) {
-        phaseSet.delete(doc.id);
-        if (phaseSet.size === 0) this.graph.phaseIndex.delete(phase);
-      }
-    }
-    const typeSet = this.graph.typeIndex.get(doc.type);
-    if (typeSet) {
-      typeSet.delete(doc.id);
-      if (typeSet.size === 0) this.graph.typeIndex.delete(doc.type);
-    }
-    for (const targetId of doc.related) {
-      const backlinks = this.graph.backlinkIndex.get(targetId);
-      if (backlinks) {
-        backlinks.delete(doc.id);
-        if (backlinks.size === 0) this.graph.backlinkIndex.delete(targetId);
-      }
-    }
-  }
-
-  private addToIndices(doc: KnowledgeDocument): void {
-    for (const tag of doc.tags) {
-      const lower = tag.toLowerCase();
-      if (!this.graph.tagIndex.has(lower)) this.graph.tagIndex.set(lower, new Set());
-      this.graph.tagIndex.get(lower)!.add(doc.id);
-    }
-    const domainLower = doc.domain.toLowerCase();
-    if (!this.graph.domainIndex.has(domainLower))
-      this.graph.domainIndex.set(domainLower, new Set());
-    this.graph.domainIndex.get(domainLower)!.add(doc.id);
-    if (!this.graph.typeIndex.has(doc.type)) this.graph.typeIndex.set(doc.type, new Set());
-    this.graph.typeIndex.get(doc.type)!.add(doc.id);
-    for (const phase of doc.phase) {
-      if (!this.graph.phaseIndex.has(phase)) this.graph.phaseIndex.set(phase, new Set());
-      this.graph.phaseIndex.get(phase)!.add(doc.id);
-    }
-    for (const targetId of doc.related) {
-      if (!this.graph.backlinkIndex.has(targetId))
-        this.graph.backlinkIndex.set(targetId, new Set());
-      this.graph.backlinkIndex.get(targetId)!.add(doc.id);
-    }
   }
 }

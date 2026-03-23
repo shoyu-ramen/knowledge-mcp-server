@@ -1,7 +1,9 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { log } from "./logger.js";
+import { ID_PATTERN, VALID_TYPES } from "./constants.js";
 
 export type DocumentStatus = "active" | "draft" | "deprecated";
 
@@ -47,7 +49,7 @@ interface RawFrontmatter {
   [key: string]: unknown;
 }
 
-function parseFrontmatter(raw: string): { frontmatter: RawFrontmatter; body: string } {
+export function parseFrontmatter(raw: string): { frontmatter: RawFrontmatter; body: string } {
   const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!match) {
     return { frontmatter: {}, body: raw };
@@ -61,7 +63,8 @@ function parseFrontmatter(raw: string): { frontmatter: RawFrontmatter; body: str
   }
 }
 
-export const VALID_TYPES = ["summary", "detail", "decision", "reference"] as const;
+// Re-export VALID_TYPES from constants for backward compatibility
+export { VALID_TYPES } from "./constants.js";
 
 export function deriveParentId(id: string): string | null {
   if (id === "root") return null;
@@ -85,8 +88,6 @@ export function collectMarkdownFiles(dir: string): string[] {
   }
   return files;
 }
-
-const ID_PATTERN = /^[a-z][a-z0-9-]*(\/[a-z][a-z0-9-]*)*$/;
 
 function validateFrontmatter(
   fm: RawFrontmatter,
@@ -178,7 +179,8 @@ export function loadSingleDocument(
 
 export function loadDocuments(
   knowledgeDir: string,
-  validDomains?: string[] | null
+  validDomains?: string[] | null,
+  warningsOut?: string[]
 ): Map<string, KnowledgeDocument> {
   const docs = new Map<string, KnowledgeDocument>();
   const files = collectMarkdownFiles(knowledgeDir);
@@ -191,7 +193,10 @@ export function loadDocuments(
     // Validate schema
     const validationWarnings = validateFrontmatter(frontmatter, filePath, validDomains);
     if (validationWarnings.length > 0) {
-      for (const w of validationWarnings) log.warn("schema_validation", { warning: w });
+      for (const w of validationWarnings) {
+        log.warn("schema_validation", { warning: w });
+        warningsOut?.push(w);
+      }
     }
     if (!frontmatter.id) continue;
 
@@ -199,7 +204,9 @@ export function loadDocuments(
 
     // Check for duplicate IDs
     if (docs.has(id)) {
+      const msg = `Duplicate document ID "${id}" in ${filePath} (existing: ${docs.get(id)!.filePath})`;
       log.warn("duplicate_id", { id, file: filePath, existingFile: docs.get(id)!.filePath });
+      warningsOut?.push(msg);
     }
     const phase = frontmatter.phase
       ? Array.isArray(frontmatter.phase)
@@ -249,6 +256,123 @@ export function loadDocuments(
     };
 
     docs.set(id, doc);
+  }
+
+  // Populate childrenIds from frontmatter `children` fields
+  for (const [parentId, children] of childrenFromFrontmatter) {
+    const parent = docs.get(parentId);
+    if (parent) {
+      parent.childrenIds = children.filter((c) => docs.has(c));
+    }
+  }
+
+  // For docs without explicit children, derive from parentId
+  for (const doc of docs.values()) {
+    if (doc.parentId && docs.has(doc.parentId)) {
+      const parent = docs.get(doc.parentId)!;
+      if (!parent.childrenIds.includes(doc.id)) {
+        parent.childrenIds.push(doc.id);
+      }
+    }
+  }
+
+  return docs;
+}
+
+/**
+ * Async version of loadDocuments — reads files concurrently to unblock the event loop.
+ * Useful for large knowledge bases (500+ docs).
+ */
+export async function loadDocumentsAsync(
+  knowledgeDir: string,
+  validDomains?: string[] | null,
+  warningsOut?: string[],
+  concurrency: number = 50
+): Promise<Map<string, KnowledgeDocument>> {
+  const docs = new Map<string, KnowledgeDocument>();
+  const files = collectMarkdownFiles(knowledgeDir);
+  const childrenFromFrontmatter = new Map<string, string[]>();
+
+  // Process files in batches for concurrency control
+  for (let i = 0; i < files.length; i += concurrency) {
+    const batch = files.slice(i, i + concurrency);
+    const results = await Promise.all(
+      batch.map(async (filePath) => {
+        const raw = await readFile(filePath, "utf-8");
+        return { filePath, raw };
+      })
+    );
+
+    for (const { filePath, raw } of results) {
+      const { frontmatter, body } = parseFrontmatter(raw);
+
+      const validationWarnings = validateFrontmatter(frontmatter, filePath, validDomains);
+      if (validationWarnings.length > 0) {
+        for (const w of validationWarnings) {
+          log.warn("schema_validation", { warning: w });
+          warningsOut?.push(w);
+        }
+      }
+      if (!frontmatter.id) continue;
+
+      const id = frontmatter.id;
+      if (docs.has(id)) {
+        const msg = `Duplicate document ID "${id}" in ${filePath} (existing: ${docs.get(id)!.filePath})`;
+        log.warn("duplicate_id", { id, file: filePath, existingFile: docs.get(id)!.filePath });
+        warningsOut?.push(msg);
+      }
+
+      const phase = frontmatter.phase
+        ? Array.isArray(frontmatter.phase)
+          ? frontmatter.phase
+          : [frontmatter.phase]
+        : [];
+
+      if (frontmatter.children) {
+        childrenFromFrontmatter.set(id, frontmatter.children);
+      }
+
+      const rawStatus =
+        frontmatter.status ||
+        (frontmatter.decision_status === "deprecated" ? "deprecated" : undefined);
+      const status: KnowledgeDocument["status"] =
+        rawStatus === "draft" ? "draft" : rawStatus === "deprecated" ? "deprecated" : "active";
+
+      const rawDecisionStatus = frontmatter.decision_status as string | undefined;
+      const validDecisionStatuses = [
+        "proposed",
+        "accepted",
+        "deprecated",
+        "superseded",
+        "finalized",
+      ];
+      const decisionStatus =
+        rawDecisionStatus && validDecisionStatuses.includes(rawDecisionStatus)
+          ? (rawDecisionStatus as KnowledgeDocument["decisionStatus"])
+          : undefined;
+
+      docs.set(id, {
+        id,
+        title: frontmatter.title || id,
+        type: (frontmatter.type as KnowledgeDocument["type"]) || "detail",
+        domain: frontmatter.domain || id.split("/")[0],
+        subdomain: frontmatter.subdomain,
+        tags: frontmatter.tags || [],
+        phase,
+        related: frontmatter.related || [],
+        parentId: deriveParentId(id),
+        childrenIds: [],
+        contentBody: body,
+        filePath: relative(join(knowledgeDir, ".."), filePath),
+        wordCount: frontmatter.word_count || body.split(/\s+/).filter(Boolean).length,
+        status,
+        supersededBy: frontmatter.superseded_by,
+        lastUpdated: frontmatter.last_updated,
+        decisionStatus,
+        alternativesConsidered: frontmatter.alternatives_considered,
+        decisionDate: frontmatter.decision_date,
+      });
+    }
   }
 
   // Populate childrenIds from frontmatter `children` fields

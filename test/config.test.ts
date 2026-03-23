@@ -96,11 +96,10 @@ embeddings:
     expect(config!.synonyms).toBeUndefined();
   });
 
-  it("returns null for malformed YAML", () => {
+  it("throws for malformed YAML", () => {
     writeFileSync(join(dir, "knowledge.config.yaml"), "{{{{invalid yaml content");
 
-    const config = loadConfig(dir);
-    expect(config).toBeNull();
+    expect(() => loadConfig(dir)).toThrow("Failed to parse knowledge.config.yaml");
   });
 
   it("returns null for empty file", () => {

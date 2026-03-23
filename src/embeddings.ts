@@ -1,3 +1,8 @@
+/**
+ * Embedding store, similarity functions, query cache, and persistence.
+ * BM25 logic is in bm25.ts, text processing in text.ts.
+ */
+
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -5,8 +10,22 @@ import type { KnowledgeDocument } from "./loader.js";
 import { log } from "./logger.js";
 import { getEmbeddingProvider } from "./embedding-provider.js";
 
+// Re-export from bm25.ts and text.ts for backward compatibility
+export { tokenize } from "./text.js";
+export {
+  buildTfIdfIndex,
+  bm25Score,
+  tfidfScore,
+  updateBm25Index,
+  type Bm25Index,
+  type TfIdfIndex,
+} from "./bm25.js";
+
+// --- Embedding vector type ---
+type EmbeddingVector = Float32Array | number[];
+
 export interface EmbeddingsStore {
-  vectors: Map<string, number[]>;
+  vectors: Map<string, EmbeddingVector>;
   available: boolean;
   normalized: boolean;
 }
@@ -19,14 +38,17 @@ export function loadEmbeddings(knowledgeDir: string): EmbeddingsStore {
 
   try {
     const raw = JSON.parse(readFileSync(embeddingsPath, "utf-8")) as Record<string, number[]>;
-    const vectors = new Map(Object.entries(raw));
+    const vectors = new Map<string, EmbeddingVector>();
+    for (const [id, arr] of Object.entries(raw)) {
+      vectors.set(id, new Float32Array(arr));
+    }
     return { vectors, available: vectors.size > 0, normalized: true };
   } catch {
     return { vectors: new Map(), available: false, normalized: true };
   }
 }
 
-export function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(a: EmbeddingVector, b: EmbeddingVector): number {
   if (a.length !== b.length) return 0;
   let dot = 0;
   let normA = 0;
@@ -41,7 +63,7 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /** Fast dot product for pre-normalized vectors (skips norm computation) */
-export function dotProduct(a: number[], b: number[]): number {
+export function dotProduct(a: EmbeddingVector, b: EmbeddingVector): number {
   if (a.length !== b.length) return 0;
   let dot = 0;
   for (let i = 0; i < a.length; i++) {
@@ -122,408 +144,6 @@ export async function embedQuery(query: string): Promise<number[] | null> {
   }
 }
 
-// --- Lightweight suffix stemmer (~18 rules, no dependencies) ---
-
-function stem(word: string): string {
-  if (word.length < 4) return word;
-
-  const rules: Array<[string, string]> = [
-    ["ization", "ize"],
-    ["ational", "ate"],
-    ["iveness", "ive"],
-    ["encies", "ency"],
-    ["ation", "ate"],
-    ["ness", ""],
-    ["ment", ""],
-    ["able", ""],
-    ["ible", ""],
-    ["ling", "le"],
-    ["ies", "y"],
-    ["ive", ""],
-    ["ing", ""],
-    ["ion", ""],
-    ["ed", ""],
-    ["ly", ""],
-    ["er", ""],
-    ["s", ""],
-  ];
-
-  for (const [suffix, replacement] of rules) {
-    if (word.endsWith(suffix)) {
-      const base = word.slice(0, -suffix.length) + replacement;
-      if (base.length >= 3) return base;
-    }
-  }
-
-  return word;
-}
-
-// --- Stopword set (filtered during BM25 tokenization, not embedding text) ---
-
-const STOPWORDS = new Set([
-  "a",
-  "about",
-  "above",
-  "after",
-  "again",
-  "against",
-  "all",
-  "am",
-  "an",
-  "and",
-  "any",
-  "are",
-  "aren't",
-  "as",
-  "at",
-  "be",
-  "because",
-  "been",
-  "before",
-  "being",
-  "below",
-  "between",
-  "both",
-  "but",
-  "by",
-  "can",
-  "can't",
-  "cannot",
-  "could",
-  "couldn't",
-  "did",
-  "didn't",
-  "do",
-  "does",
-  "doesn't",
-  "doing",
-  "don't",
-  "down",
-  "during",
-  "each",
-  "few",
-  "for",
-  "from",
-  "further",
-  "get",
-  "got",
-  "had",
-  "hadn't",
-  "has",
-  "hasn't",
-  "have",
-  "haven't",
-  "having",
-  "he",
-  "he'd",
-  "he'll",
-  "he's",
-  "her",
-  "here",
-  "here's",
-  "hers",
-  "herself",
-  "him",
-  "himself",
-  "his",
-  "how",
-  "how's",
-  "if",
-  "in",
-  "into",
-  "is",
-  "isn't",
-  "it",
-  "it's",
-  "its",
-  "itself",
-  "let's",
-  "me",
-  "might",
-  "more",
-  "most",
-  "mustn't",
-  "my",
-  "myself",
-  "no",
-  "nor",
-  "not",
-  "of",
-  "off",
-  "on",
-  "once",
-  "only",
-  "or",
-  "other",
-  "ought",
-  "our",
-  "ours",
-  "ourselves",
-  "out",
-  "over",
-  "own",
-  "same",
-  "shan't",
-  "she",
-  "she'd",
-  "she'll",
-  "she's",
-  "should",
-  "shouldn't",
-  "so",
-  "some",
-  "such",
-  "than",
-  "that",
-  "that's",
-  "the",
-  "their",
-  "theirs",
-  "them",
-  "themselves",
-  "then",
-  "there",
-  "there's",
-  "these",
-  "they",
-  "they'd",
-  "they'll",
-  "they're",
-  "they've",
-  "this",
-  "those",
-  "through",
-  "to",
-  "too",
-  "under",
-  "until",
-  "up",
-  "us",
-  "very",
-  "was",
-  "wasn't",
-  "we",
-  "we'd",
-  "we'll",
-  "we're",
-  "we've",
-  "were",
-  "weren't",
-  "what",
-  "what's",
-  "when",
-  "when's",
-  "where",
-  "where's",
-  "which",
-  "while",
-  "who",
-  "who's",
-  "whom",
-  "why",
-  "why's",
-  "will",
-  "with",
-  "won't",
-  "would",
-  "wouldn't",
-  "you",
-  "you'd",
-  "you'll",
-  "you're",
-  "you've",
-  "your",
-  "yours",
-  "yourself",
-  "yourselves",
-]);
-
-// --- Tokenizer (preserves compound terms, adds stems alongside originals) ---
-
-export function tokenize(text: string): string[] {
-  const lower = text.toLowerCase();
-  const tokens: string[] = [];
-
-  // Extract compound terms before stripping special chars (e.g., c++, c#)
-  const compoundRegex = /[a-z][a-z0-9]*\+\+|[a-z]#/g;
-  let match;
-  while ((match = compoundRegex.exec(lower)) !== null) {
-    tokens.push(match[0]);
-  }
-
-  // Standard tokenization (preserve hyphens for compound words like tf-idf)
-  const standard = lower
-    .replace(/[^a-z0-9\s-]/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length > 1);
-
-  for (const token of standard) {
-    if (STOPWORDS.has(token)) continue;
-    tokens.push(token);
-    const stemmed = stem(token);
-    if (stemmed !== token) {
-      tokens.push(stemmed);
-    }
-  }
-
-  return tokens;
-}
-
-// --- BM25 Index ---
-
-export interface Bm25Index {
-  docTermFreqs: Map<string, Map<string, number>>; // docId → term → raw count
-  docFreq: Map<string, number>; // term → number of docs containing it
-  idf: Map<string, number>; // term → IDF score
-  docLengths: Map<string, number>; // docId → token count
-  avgDocLength: number;
-  docCount: number;
-}
-
-/** @deprecated Use Bm25Index — kept for backward compatibility */
-export type TfIdfIndex = Bm25Index;
-
-function computeIdf(docFreq: Map<string, number>, docCount: number): Map<string, number> {
-  const idf = new Map<string, number>();
-  for (const [term, df] of docFreq) {
-    // Standard BM25 IDF: log((N - df + 0.5) / (df + 0.5) + 1)
-    idf.set(term, Math.log((docCount - df + 0.5) / (df + 0.5) + 1));
-  }
-  return idf;
-}
-
-export function buildTfIdfIndex(docs: Map<string, KnowledgeDocument>): Bm25Index {
-  const docTermFreqs = new Map<string, Map<string, number>>();
-  const docFreq = new Map<string, number>();
-  const docLengths = new Map<string, number>();
-  const docCount = docs.size;
-  let totalLength = 0;
-
-  for (const doc of docs.values()) {
-    // Title tokens 3x, tag tokens 2x, body 1x for field boosting
-    const text = buildBoostedText(doc);
-    const tokens = tokenize(text);
-    const termFreq = new Map<string, number>();
-    const seenTerms = new Set<string>();
-
-    for (const token of tokens) {
-      termFreq.set(token, (termFreq.get(token) || 0) + 1);
-      if (!seenTerms.has(token)) {
-        seenTerms.add(token);
-        docFreq.set(token, (docFreq.get(token) || 0) + 1);
-      }
-    }
-
-    // Store raw term counts (no normalization — BM25 handles length internally)
-    docTermFreqs.set(doc.id, termFreq);
-    docLengths.set(doc.id, tokens.length);
-    totalLength += tokens.length;
-  }
-
-  const avgDocLength = docCount > 0 ? totalLength / docCount : 0;
-  const idf = computeIdf(docFreq, docCount);
-
-  return { docTermFreqs, docFreq, idf, docLengths, avgDocLength, docCount };
-}
-
-// --- Field boosting: title 3x, tags 2x, body 1x ---
-
-function buildBoostedText(doc: KnowledgeDocument): string {
-  const title = doc.title;
-  const tags = doc.tags.join(" ");
-  return `${title} ${title} ${title} ${tags} ${tags} ${doc.contentBody}`;
-}
-
-// BM25 scoring constants
-const BM25_K1 = 1.2;
-const BM25_B = 0.75;
-
-export function bm25Score(query: string, docId: string, index: Bm25Index): number {
-  const queryTokens = tokenize(query);
-  const docTerms = index.docTermFreqs.get(docId);
-  if (!docTerms) return 0;
-
-  const docLen = index.docLengths.get(docId) || 0;
-  let score = 0;
-
-  for (const token of queryTokens) {
-    const tf = docTerms.get(token) || 0;
-    const idf = index.idf.get(token) || 0;
-    if (tf === 0 || idf === 0) continue;
-
-    // BM25: IDF * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * docLen / avgDocLen))
-    const numerator = tf * (BM25_K1 + 1);
-    const denominator = tf + BM25_K1 * (1 - BM25_B + (BM25_B * docLen) / (index.avgDocLength || 1));
-    score += idf * (numerator / denominator);
-  }
-
-  return score;
-}
-
-/** @deprecated Use bm25Score — kept for backward compatibility */
-export const tfidfScore = bm25Score;
-
-// --- Incremental Index Updates ---
-
-export function updateBm25Index(
-  index: Bm25Index,
-  docId: string,
-  doc: KnowledgeDocument | null
-): void {
-  // Remove old document if it exists in the index
-  const oldTermFreqs = index.docTermFreqs.get(docId);
-  if (oldTermFreqs) {
-    const oldLength = index.docLengths.get(docId) || 0;
-
-    // Decrement document frequencies for each term
-    for (const term of oldTermFreqs.keys()) {
-      const df = index.docFreq.get(term);
-      if (df !== undefined) {
-        if (df <= 1) {
-          index.docFreq.delete(term);
-        } else {
-          index.docFreq.set(term, df - 1);
-        }
-      }
-    }
-
-    index.docTermFreqs.delete(docId);
-    index.docLengths.delete(docId);
-    index.docCount--;
-
-    // Recalculate average document length
-    const totalLength = index.avgDocLength * (index.docCount + 1) - oldLength;
-    index.avgDocLength = index.docCount > 0 ? totalLength / index.docCount : 0;
-  }
-
-  // Add new document if provided
-  if (doc) {
-    const text = buildBoostedText(doc);
-    const tokens = tokenize(text);
-    const termFreq = new Map<string, number>();
-    const seenTerms = new Set<string>();
-
-    for (const token of tokens) {
-      termFreq.set(token, (termFreq.get(token) || 0) + 1);
-      if (!seenTerms.has(token)) {
-        seenTerms.add(token);
-        index.docFreq.set(token, (index.docFreq.get(token) || 0) + 1);
-      }
-    }
-
-    index.docTermFreqs.set(docId, termFreq);
-    index.docLengths.set(docId, tokens.length);
-
-    // Recalculate average document length
-    const totalLength = index.avgDocLength * index.docCount + tokens.length;
-    index.docCount++;
-    index.avgDocLength = totalLength / index.docCount;
-  }
-
-  // Rebuild IDF (fast — just iterates the docFreq map)
-  index.idf = computeIdf(index.docFreq, index.docCount);
-}
-
 // --- Embedding Input Format (shared between inline and batch embedding) ---
 
 // Max characters for embedding input — prevents silent model-level truncation
@@ -569,7 +189,7 @@ export async function embedSingleDocument(
     backoffMs = 0;
     backoffUntil = 0;
 
-    embeddingsStore.vectors.set(doc.id, vector);
+    embeddingsStore.vectors.set(doc.id, new Float32Array(vector));
     embeddingsStore.available = true;
     persistEmbeddings(embeddingsStore, knowledgeDir);
     log.debug("embed_doc", { id: doc.id });
@@ -592,6 +212,16 @@ export function removeEmbedding(
   }
 }
 
+// --- Helpers to convert Float32Array <-> number[] for JSON serialization ---
+
+function vectorsToJson(vectors: Map<string, EmbeddingVector>): Record<string, number[]> {
+  const obj: Record<string, number[]> = {};
+  for (const [id, vec] of vectors) {
+    obj[id] = vec instanceof Float32Array ? Array.from(vec) : vec;
+  }
+  return obj;
+}
+
 // --- Debounced async embedding persistence ---
 
 let pendingFlush: { store: EmbeddingsStore; knowledgeDir: string } | null = null;
@@ -603,13 +233,9 @@ async function flushEmbeddings(): Promise<void> {
   pendingFlush = null;
   try {
     const embeddingsPath = join(knowledgeDir, ".embeddings.json");
-    const obj: Record<string, number[]> = {};
-    for (const [id, vec] of store.vectors) {
-      obj[id] = vec;
-    }
-    await writeFile(embeddingsPath, JSON.stringify(obj), "utf-8");
-  } catch {
-    // Best-effort persistence
+    await writeFile(embeddingsPath, JSON.stringify(vectorsToJson(store.vectors)), "utf-8");
+  } catch (err) {
+    log.error("flush_embeddings_error", { error: String(err) });
   }
 }
 
@@ -633,12 +259,8 @@ process.on("exit", () => {
   pendingFlush = null;
   try {
     const embeddingsPath = join(knowledgeDir, ".embeddings.json");
-    const obj: Record<string, number[]> = {};
-    for (const [id, vec] of store.vectors) {
-      obj[id] = vec;
-    }
-    writeFileSync(embeddingsPath, JSON.stringify(obj), "utf-8");
-  } catch {
-    // Best-effort — process is exiting
+    writeFileSync(embeddingsPath, JSON.stringify(vectorsToJson(store.vectors)), "utf-8");
+  } catch (err) {
+    log.error("flush_embeddings_exit_error", { error: String(err) });
   }
 });

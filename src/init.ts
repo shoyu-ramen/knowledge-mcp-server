@@ -32,7 +32,7 @@ const CONFIG_TEMPLATE = `# Knowledge graph configuration
 # Default: local model (no API key needed, runs in-process)
 # embeddings:
 #   provider: "local"                    # "local" (default) or "voyage"
-#   model: "Xenova/all-MiniLM-L6-v2"    # local model name
+#   model: "BAAI/bge-small-en-v1.5"     # local model name (default)
 #   # cache_dir: "~/.cache/my-models"   # optional model cache override
 #
 # To use Voyage AI instead:

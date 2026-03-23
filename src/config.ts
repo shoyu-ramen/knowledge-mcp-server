@@ -21,6 +21,10 @@ export interface KnowledgeConfig {
     api_key_env?: string;
     cache_dir?: string;
   };
+  bm25?: {
+    k1?: number;
+    b?: number;
+  };
 }
 
 const CONFIG_FILENAME = "knowledge.config.yaml";
@@ -45,12 +49,15 @@ export function loadConfig(knowledgeDir: string): KnowledgeConfig | null {
       log.warn("config", { error: "Config file is empty or not an object" });
       return null;
     }
-    return parsed as KnowledgeConfig;
+    const { config, warnings } = validateConfig(parsed as Record<string, unknown>);
+    for (const w of warnings) {
+      log.warn("config_validation", { warning: w });
+    }
+    return config;
   } catch (err) {
-    log.warn("config", {
-      error: `Failed to parse ${CONFIG_FILENAME}: ${err instanceof Error ? err.message : String(err)}`,
-    });
-    return null;
+    const message = `Failed to parse ${CONFIG_FILENAME}: ${err instanceof Error ? err.message : String(err)}`;
+    log.error("config", { error: message });
+    throw new Error(message, { cause: err });
   }
 }
 
@@ -100,4 +107,86 @@ export function getEffectivePhaseIds(config: KnowledgeConfig | null): number[] |
     return config.phases.map((p) => p.id);
   }
   return null;
+}
+
+// --- Structural config validation ---
+
+const KNOWN_TOP_LEVEL_KEYS = new Set([
+  "name",
+  "domains",
+  "phases",
+  "query_hints",
+  "synonyms",
+  "embeddings",
+  "bm25",
+]);
+
+/**
+ * Validate the structure of a parsed config object.
+ * Returns the config and any non-fatal warnings.
+ */
+export function validateConfig(parsed: Record<string, unknown>): {
+  config: KnowledgeConfig;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+
+  // Warn on unknown top-level keys
+  for (const key of Object.keys(parsed)) {
+    if (!KNOWN_TOP_LEVEL_KEYS.has(key)) {
+      warnings.push(`Unknown config key "${key}" — will be ignored.`);
+    }
+  }
+
+  // Validate domains
+  if (parsed.domains !== undefined) {
+    if (!Array.isArray(parsed.domains)) {
+      warnings.push(`"domains" must be an array of strings.`);
+    } else if (parsed.domains.some((d: unknown) => typeof d !== "string")) {
+      warnings.push(`"domains" contains non-string values.`);
+    }
+  }
+
+  // Validate phases
+  if (parsed.phases !== undefined) {
+    if (!Array.isArray(parsed.phases)) {
+      warnings.push(`"phases" must be an array of { id, name } objects.`);
+    } else {
+      for (const p of parsed.phases as unknown[]) {
+        if (!p || typeof p !== "object" || !("id" in p) || !("name" in p)) {
+          warnings.push(`Each phase must have "id" (number) and "name" (string) fields.`);
+          break;
+        }
+      }
+    }
+  }
+
+  // Validate embeddings
+  if (parsed.embeddings !== undefined) {
+    if (!parsed.embeddings || typeof parsed.embeddings !== "object") {
+      warnings.push(`"embeddings" must be an object.`);
+    } else {
+      const emb = parsed.embeddings as Record<string, unknown>;
+      if (emb.provider !== undefined && emb.provider !== "local" && emb.provider !== "voyage") {
+        warnings.push(`"embeddings.provider" must be "local" or "voyage".`);
+      }
+    }
+  }
+
+  // Validate bm25
+  if (parsed.bm25 !== undefined) {
+    if (!parsed.bm25 || typeof parsed.bm25 !== "object") {
+      warnings.push(`"bm25" must be an object with optional k1/b numbers.`);
+    } else {
+      const bm25 = parsed.bm25 as Record<string, unknown>;
+      if (bm25.k1 !== undefined && typeof bm25.k1 !== "number") {
+        warnings.push(`"bm25.k1" must be a number.`);
+      }
+      if (bm25.b !== undefined && typeof bm25.b !== "number") {
+        warnings.push(`"bm25.b" must be a number.`);
+      }
+    }
+  }
+
+  return { config: parsed as KnowledgeConfig, warnings };
 }

@@ -1,14 +1,9 @@
 import type { KnowledgeGraph } from "./graph.js";
 import { getAncestors, getRelated } from "./graph.js";
 import { classifyQuery, expandSynonyms, type ClassifierConfig } from "./query-classifier.js";
-import {
-  cosineSimilarity,
-  dotProduct,
-  embedQuery,
-  bm25Score,
-  tokenize,
-  type Bm25Index,
-} from "./embeddings.js";
+import { cosineSimilarity, dotProduct, embedQuery } from "./embeddings.js";
+import { bm25Score, type Bm25Index } from "./bm25.js";
+import { tokenize } from "./text.js";
 import {
   formatSearchResults,
   type FormattedDoc,
@@ -16,13 +11,14 @@ import {
   type FacetCounts,
 } from "./formatter.js";
 import type { KnowledgeDocument } from "./loader.js";
-import { rerank } from "./reranker.js";
+import { rerank, mmrDiversify } from "./reranker.js";
 import { log } from "./logger.js";
+import { logQuery } from "./search-analytics.js";
 
 // Re-export for backward compatibility
 export type TfIdfIndex = Bm25Index;
 
-interface SearchOptions {
+export interface SearchOptions {
   query: string;
   domains?: string[];
   phases?: number[];
@@ -45,7 +41,7 @@ function classifyAndMerge(
 ): {
   domains: string[];
   phases: number[];
-  queryType: "broad" | "specific" | "decision";
+  queryType: "broad" | "specific" | "decision" | "procedural" | "troubleshooting";
 } {
   const classification = classifyQuery(options.query, classifierConfig);
 
@@ -327,14 +323,55 @@ function expandResults(
   return formattedDocs;
 }
 
+/** Structured search result for programmatic consumers. */
+export interface SearchResult {
+  query: string;
+  queryType: string;
+  searchMethod: string;
+  confidence: "high" | "medium" | "low";
+  results: FormattedDoc[];
+  facets: FacetCounts;
+  ms: number;
+}
+
+/** Search returning structured data for programmatic use. */
+export async function knowledgeSearchStructured(
+  graph: KnowledgeGraph,
+  bm25Index: Bm25Index,
+  options: SearchOptions,
+  classifierConfig: ClassifierConfig,
+  knowledgeDir?: string
+): Promise<SearchResult> {
+  return searchCore(graph, bm25Index, options, classifierConfig, knowledgeDir);
+}
+
 export async function knowledgeSearch(
   graph: KnowledgeGraph,
   bm25Index: Bm25Index,
   options: SearchOptions,
-  classifierConfig: ClassifierConfig
+  classifierConfig: ClassifierConfig,
+  knowledgeDir?: string
 ): Promise<string> {
+  const result = await searchCore(graph, bm25Index, options, classifierConfig, knowledgeDir);
+  return formatSearchResults(
+    result.query,
+    result.results,
+    options.detailLevel || "normal",
+    result.searchMethod,
+    result.facets,
+    result.confidence
+  );
+}
+
+async function searchCore(
+  graph: KnowledgeGraph,
+  bm25Index: Bm25Index,
+  options: SearchOptions,
+  classifierConfig: ClassifierConfig,
+  knowledgeDir?: string
+): Promise<SearchResult> {
   const maxResults = options.maxResults || 10;
-  const detailLevel = options.detailLevel || "normal";
+  const _detailLevel = options.detailLevel || "normal";
   const searchStart = Date.now();
 
   // Stage 1: Classify query
@@ -378,6 +415,14 @@ export async function knowledgeSearch(
       topN = Math.min(3, scored.length);
       maxRelated = 0;
       break;
+    case "procedural":
+      topN = Math.min(5, scored.length);
+      maxRelated = 2;
+      break;
+    case "troubleshooting":
+      topN = Math.min(5, scored.length);
+      maxRelated = 1;
+      break;
     case "specific":
     default:
       topN = Math.min(6, scored.length);
@@ -385,7 +430,8 @@ export async function knowledgeSearch(
       break;
   }
 
-  const topResults = scored.slice(0, topN);
+  // Apply MMR diversification to reduce near-duplicate results
+  const topResults = mmrDiversify(scored, graph.embeddings, 0.7, topN);
 
   // Stage 4: Expand with ancestors + related
   const formatted = expandResults(
@@ -414,31 +460,50 @@ export async function knowledgeSearch(
     }
   }
 
+  const ms = Date.now() - searchStart;
+
   log.info("search", {
     query: options.query,
     queryType,
     method: searchMethod,
     candidates: candidates.size,
     results: formatted.length,
-    ms: Date.now() - searchStart,
+    ms,
   });
 
-  // Compute search confidence based on top result score
-  const topScore = topResults.length > 0 ? topResults[0].score : 0;
+  // Self-calibrating confidence based on score distribution
   let confidence: "high" | "medium" | "low";
-  if (searchMethod === "vector+bm25") {
-    confidence = topScore > 0.04 ? "high" : topScore > 0.025 ? "medium" : "low";
+  if (scored.length === 0) {
+    confidence = "low";
   } else {
-    confidence = topScore > 5 ? "high" : topScore > 2 ? "medium" : "low";
+    const topScore = topResults.length > 0 ? topResults[0].score : 0;
+    const scores = scored.slice(0, Math.min(20, scored.length)).map((s) => s.score);
+    const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const variance = scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length;
+    const stddev = Math.sqrt(variance);
+    confidence = topScore > mean + stddev ? "high" : topScore > mean ? "medium" : "low";
   }
 
-  // Stage 5: Format for Claude
-  return formatSearchResults(
-    options.query,
-    formatted,
-    detailLevel,
+  // Log analytics (best-effort, non-blocking)
+  if (knowledgeDir) {
+    logQuery(knowledgeDir, {
+      query: options.query,
+      timestamp: new Date().toISOString(),
+      method: searchMethod,
+      resultCount: formatted.length,
+      confidence,
+      topDocId: topResults.length > 0 ? topResults[0].doc.id : null,
+      ms,
+    });
+  }
+
+  return {
+    query: options.query,
+    queryType,
     searchMethod,
+    confidence,
+    results: formatted,
     facets,
-    confidence
-  );
+    ms,
+  };
 }

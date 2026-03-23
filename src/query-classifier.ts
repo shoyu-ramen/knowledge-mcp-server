@@ -3,7 +3,7 @@ import type { KnowledgeConfig } from "./config.js";
 export interface QueryClassification {
   domains: string[];
   phases: number[];
-  queryType: "broad" | "specific" | "decision";
+  queryType: "broad" | "specific" | "decision" | "procedural" | "troubleshooting";
 }
 
 export interface ClassifierConfig {
@@ -93,6 +93,40 @@ const DECISION_KEYWORDS = [
   "pros and cons",
 ];
 
+const PROCEDURAL_KEYWORDS = [
+  "how to",
+  "how do i",
+  "how do you",
+  "steps to",
+  "guide for",
+  "guide to",
+  "tutorial",
+  "walkthrough",
+  "instructions for",
+  "setup",
+  "set up",
+  "configure",
+  "install",
+];
+
+const TROUBLESHOOTING_KEYWORDS = [
+  "error",
+  "fix for",
+  "fix the",
+  "broken",
+  "issue with",
+  "problem with",
+  "debug",
+  "doesn't work",
+  "does not work",
+  "fails",
+  "failing",
+  "crash",
+  "not working",
+  "troubleshoot",
+  "resolve",
+];
+
 export function expandSynonyms(query: string, synonymMap: Record<string, string[]>): string {
   const lower = query.toLowerCase();
   const tokens = lower.split(/\s+/);
@@ -157,6 +191,10 @@ export function classifyQuery(query: string, config: ClassifierConfig): QueryCla
   let queryType: QueryClassification["queryType"] = "specific";
   if (DECISION_KEYWORDS.some((kw) => lower.includes(kw))) {
     queryType = "decision";
+  } else if (PROCEDURAL_KEYWORDS.some((kw) => lower.includes(kw))) {
+    queryType = "procedural";
+  } else if (TROUBLESHOOTING_KEYWORDS.some((kw) => lower.includes(kw))) {
+    queryType = "troubleshooting";
   } else if (
     lower.startsWith("how does") ||
     lower.startsWith("what is") ||

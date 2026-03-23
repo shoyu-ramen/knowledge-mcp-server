@@ -1,20 +1,17 @@
 import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { join, relative } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
-import { deriveParentId, VALID_TYPES, type DocumentStatus } from "./loader.js";
-import {
-  updateBm25Index,
-  embedSingleDocument,
-  removeEmbedding,
-  type Bm25Index,
-} from "./embeddings.js";
+import { deriveParentId, type DocumentStatus } from "./loader.js";
+import { embedSingleDocument, removeEmbedding } from "./embeddings.js";
+import { updateBm25Index, bm25Score, type Bm25Index } from "./bm25.js";
 import type { KnowledgeDocument } from "./loader.js";
 import type { KnowledgeGraph, TagTaxonomy } from "./graph.js";
+import { addToIndices, removeFromIndices } from "./index-ops.js";
+import { ID_PATTERN, VALID_TYPES } from "./constants.js";
+import { log } from "./logger.js";
 
 // Re-export for backward compatibility
 export type TfIdfIndex = Bm25Index;
-
-const ID_PATTERN = /^[a-z][a-z0-9-]*(\/[a-z][a-z0-9-]*)*$/;
 
 export interface WriteParams {
   id: string;
@@ -41,6 +38,7 @@ export interface WriteResult {
   status: "created" | "updated";
   tfidfIndex: Bm25Index;
   warnings: string[];
+  suggestions: Array<{ id: string; title: string; score: number }>;
 }
 
 export interface DeleteResult {
@@ -194,42 +192,10 @@ export function writeDocument(
 
   const isUpdate = graph.documents.has(params.id);
 
-  // If updating, remove old entries from tag, domain, phase, and backlink indices
+  // If updating, remove old entries from all indices
   if (isUpdate) {
     const oldDoc = graph.documents.get(params.id)!;
-    for (const tag of oldDoc.tags) {
-      const tagSet = graph.tagIndex.get(tag.toLowerCase());
-      if (tagSet) {
-        tagSet.delete(params.id);
-        if (tagSet.size === 0) graph.tagIndex.delete(tag.toLowerCase());
-      }
-    }
-    const domainSet = graph.domainIndex.get(oldDoc.domain.toLowerCase());
-    if (domainSet) {
-      domainSet.delete(params.id);
-      if (domainSet.size === 0) graph.domainIndex.delete(oldDoc.domain.toLowerCase());
-    }
-    for (const phase of oldDoc.phase) {
-      const phaseSet = graph.phaseIndex.get(phase);
-      if (phaseSet) {
-        phaseSet.delete(params.id);
-        if (phaseSet.size === 0) graph.phaseIndex.delete(phase);
-      }
-    }
-    // Remove from type index
-    const typeSet = graph.typeIndex.get(oldDoc.type);
-    if (typeSet) {
-      typeSet.delete(params.id);
-      if (typeSet.size === 0) graph.typeIndex.delete(oldDoc.type);
-    }
-    // Remove old backlink entries
-    for (const targetId of oldDoc.related) {
-      const backlinks = graph.backlinkIndex.get(targetId);
-      if (backlinks) {
-        backlinks.delete(params.id);
-        if (backlinks.size === 0) graph.backlinkIndex.delete(targetId);
-      }
-    }
+    removeFromIndices(graph, oldDoc);
   }
 
   // For summary updates, merge provided children with existing auto-discovered children
@@ -304,34 +270,7 @@ export function writeDocument(
 
   // Update in-memory graph
   graph.documents.set(params.id, doc);
-
-  // Update tag index
-  for (const tag of doc.tags) {
-    const lower = tag.toLowerCase();
-    if (!graph.tagIndex.has(lower)) graph.tagIndex.set(lower, new Set());
-    graph.tagIndex.get(lower)!.add(doc.id);
-  }
-
-  // Update domain index
-  const domainLower = doc.domain.toLowerCase();
-  if (!graph.domainIndex.has(domainLower)) graph.domainIndex.set(domainLower, new Set());
-  graph.domainIndex.get(domainLower)!.add(doc.id);
-
-  // Update type index
-  if (!graph.typeIndex.has(doc.type)) graph.typeIndex.set(doc.type, new Set());
-  graph.typeIndex.get(doc.type)!.add(doc.id);
-
-  // Update phase index
-  for (const phase of doc.phase) {
-    if (!graph.phaseIndex.has(phase)) graph.phaseIndex.set(phase, new Set());
-    graph.phaseIndex.get(phase)!.add(doc.id);
-  }
-
-  // Update backlink index
-  for (const targetId of doc.related) {
-    if (!graph.backlinkIndex.has(targetId)) graph.backlinkIndex.set(targetId, new Set());
-    graph.backlinkIndex.get(targetId)!.add(doc.id);
-  }
+  addToIndices(graph, doc);
 
   // Update parent's childrenIds
   if (parentId) {
@@ -345,7 +284,23 @@ export function writeDocument(
   updateBm25Index(tfidfIndex, doc.id, doc);
 
   // Fire-and-forget inline embedding
-  embedSingleDocument(graph.embeddings, knowledgeDir, doc).catch(() => {});
+  embedSingleDocument(graph.embeddings, knowledgeDir, doc).catch((err) => {
+    log.warn("embed_doc_fire_and_forget", { id: doc.id, error: String(err) });
+  });
+
+  // Auto-linking suggestions: BM25-search new content against corpus
+  const suggestions: Array<{ id: string; title: string; score: number }> = [];
+  const relatedSet = new Set(doc.related);
+  const query = `${doc.title} ${doc.tags.join(" ")}`;
+  for (const [candidateId, candidateDoc] of graph.documents) {
+    if (candidateId === doc.id || relatedSet.has(candidateId)) continue;
+    if (candidateDoc.parentId === doc.id || doc.parentId === candidateId) continue;
+    const score = bm25Score(query, candidateId, tfidfIndex);
+    if (score > 0) {
+      suggestions.push({ id: candidateId, title: candidateDoc.title, score });
+    }
+  }
+  suggestions.sort((a, b) => b.score - a.score);
 
   return {
     id: params.id,
@@ -354,6 +309,7 @@ export function writeDocument(
     status: isUpdate ? "updated" : "created",
     tfidfIndex,
     warnings,
+    suggestions: suggestions.slice(0, 5),
   };
 }
 
@@ -410,37 +366,8 @@ export function deleteDocument(
     }
   }
 
-  // Remove from tag index
-  for (const tag of doc.tags) {
-    const tagSet = graph.tagIndex.get(tag.toLowerCase());
-    if (tagSet) {
-      tagSet.delete(id);
-      if (tagSet.size === 0) graph.tagIndex.delete(tag.toLowerCase());
-    }
-  }
-
-  // Remove from domain index
-  const domainSet = graph.domainIndex.get(doc.domain.toLowerCase());
-  if (domainSet) {
-    domainSet.delete(id);
-    if (domainSet.size === 0) graph.domainIndex.delete(doc.domain.toLowerCase());
-  }
-
-  // Remove from type index
-  const delTypeSet = graph.typeIndex.get(doc.type);
-  if (delTypeSet) {
-    delTypeSet.delete(id);
-    if (delTypeSet.size === 0) graph.typeIndex.delete(doc.type);
-  }
-
-  // Remove from phase index
-  for (const phase of doc.phase) {
-    const phaseSet = graph.phaseIndex.get(phase);
-    if (phaseSet) {
-      phaseSet.delete(id);
-      if (phaseSet.size === 0) graph.phaseIndex.delete(phase);
-    }
-  }
+  // Remove from all indices
+  removeFromIndices(graph, doc);
 
   // Remove from parent's childrenIds
   if (doc.parentId) {
@@ -450,15 +377,7 @@ export function deleteDocument(
     }
   }
 
-  // Remove from backlink index (forward links this doc had)
-  for (const targetId of doc.related) {
-    const bl = graph.backlinkIndex.get(targetId);
-    if (bl) {
-      bl.delete(id);
-      if (bl.size === 0) graph.backlinkIndex.delete(targetId);
-    }
-  }
-  // Remove backlink entry for this doc
+  // Remove backlink entry for this doc (inbound links from other docs)
   graph.backlinkIndex.delete(id);
 
   // Remove from documents map

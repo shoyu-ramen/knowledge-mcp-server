@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   formatLookupResult,
@@ -14,6 +14,7 @@ import { KnowledgeEngine } from "./engine.js";
 import type { KnowledgeGraph } from "./graph.js";
 import type { KnowledgeConfig } from "./config.js";
 import type { TfIdfIndex } from "./search.js";
+import { VERSION } from "./constants.js";
 
 export interface KnowledgeServerResult {
   server: McpServer;
@@ -30,7 +31,7 @@ export function createKnowledgeServer(knowledgeDir: string): KnowledgeServerResu
 
   const server = new McpServer({
     name: "knowledge",
-    version: "1.3.0",
+    version: VERSION,
   });
 
   // Tool 1: knowledge_search
@@ -406,8 +407,55 @@ export function createKnowledgeServer(knowledgeDir: string): KnowledgeServerResu
     })
   );
 
+  // MCP Resources: expose documents as knowledge:// URIs
+  server.resource(
+    "knowledge-document",
+    new ResourceTemplate("knowledge://documents/{docId}", {
+      list: async () => {
+        const resources = [];
+        for (const doc of engine.graph.documents.values()) {
+          resources.push({
+            uri: `knowledge://documents/${encodeURIComponent(doc.id)}`,
+            name: doc.title,
+            mimeType: "text/markdown",
+            description: `[${doc.type}] ${doc.domain}${doc.subdomain ? "/" + doc.subdomain : ""} — ${doc.tags.join(", ")}`,
+          });
+        }
+        return { resources };
+      },
+    }),
+    { description: "Knowledge graph documents as Markdown" },
+    async (uri, variables) => {
+      const docId = decodeURIComponent(variables.docId as string);
+      const doc = engine.graph.documents.get(docId);
+      if (!doc) {
+        return {
+          contents: [
+            { uri: uri.href, mimeType: "text/plain", text: `Document not found: ${docId}` },
+          ],
+        };
+      }
+      // Return full document content as markdown
+      const header = `# ${doc.title}\n\n**ID:** ${doc.id}  \n**Type:** ${doc.type}  \n**Domain:** ${doc.domain}  \n**Tags:** ${doc.tags.join(", ")}  \n**Phase:** ${doc.phase.join(", ")}  \n\n---\n\n`;
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "text/markdown",
+            text: header + doc.contentBody,
+          },
+        ],
+      };
+    }
+  );
+
   // Start watching for external file changes
   engine.watch();
+
+  // Clean up file watchers on server close
+  server.server.onclose = () => {
+    engine.close();
+  };
 
   return {
     server,

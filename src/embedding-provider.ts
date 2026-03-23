@@ -11,6 +11,7 @@ export interface EmbeddingProvider {
   readonly name: "local" | "voyage";
   readonly model: string;
   readonly dimensions: number;
+  readonly instructionPrefix?: string;
   embedDocuments(texts: string[]): Promise<number[][]>;
   embedQuery(text: string): Promise<number[] | null>;
 }
@@ -39,6 +40,7 @@ export class LocalProvider implements EmbeddingProvider {
   readonly name = "local" as const;
   readonly model: string;
   readonly dimensions: number;
+  readonly instructionPrefix?: string;
   private readonly cacheDir: string | undefined;
   private pipeline: Pipeline | null = null;
   private initPromise: Promise<void> | null = null;
@@ -46,6 +48,10 @@ export class LocalProvider implements EmbeddingProvider {
   constructor(model?: string, cacheDir?: string) {
     this.model = model || DEFAULT_LOCAL_MODEL;
     this.dimensions = LOCAL_MODEL_DIMS[this.model] ?? DEFAULT_LOCAL_DIMS;
+    // BGE models benefit from an instruction prefix for query embeddings
+    if (this.model.toLowerCase().includes("bge")) {
+      this.instructionPrefix = "Represent this sentence: ";
+    }
     this.cacheDir =
       cacheDir ||
       process.env.TRANSFORMERS_CACHE ||
@@ -82,7 +88,8 @@ export class LocalProvider implements EmbeddingProvider {
   async embedQuery(text: string): Promise<number[] | null> {
     try {
       await this.loadPipeline();
-      const output = await this.pipeline!([text], { pooling: "mean", normalize: true });
+      const prefixed = this.instructionPrefix ? `${this.instructionPrefix}${text}` : text;
+      const output = await this.pipeline!([prefixed], { pooling: "mean", normalize: true });
       return output.tolist()[0];
     } catch (err) {
       log.warn("local_embed_query_error", { error: String(err) });
@@ -160,12 +167,25 @@ export class VoyageProvider implements EmbeddingProvider {
 
 let activeProvider: EmbeddingProvider | null = null;
 
-export function initEmbeddingProvider(config?: {
-  provider?: string;
-  model?: string;
-  api_key_env?: string;
-  cache_dir?: string;
-}): void {
+export function initEmbeddingProvider(
+  config?: {
+    provider?: string;
+    model?: string;
+    api_key_env?: string;
+    cache_dir?: string;
+  },
+  existingProvider?: EmbeddingProvider
+): void {
+  // Allow injecting an existing provider (for multi-engine use)
+  if (existingProvider) {
+    activeProvider = existingProvider;
+    log.info("embedding_provider", {
+      provider: existingProvider.name,
+      model: existingProvider.model,
+    });
+    return;
+  }
+
   if (config?.provider === "voyage") {
     const envVar = config.api_key_env || "VOYAGE_API_KEY";
     const apiKey = process.env[envVar];

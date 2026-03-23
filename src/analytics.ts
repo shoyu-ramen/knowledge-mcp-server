@@ -1,4 +1,11 @@
 import type { KnowledgeGraph } from "./graph.js";
+import { SIX_MONTHS_MS } from "./constants.js";
+
+export interface ContentQualityItem {
+  id: string;
+  score: number;
+  issues: string[];
+}
 
 export interface GraphStats {
   totalDocs: number;
@@ -10,6 +17,7 @@ export interface GraphStats {
   mostConnected: Array<{ id: string; connections: number }>;
   orphanCount: number;
   embeddingCoverage: { total: number; covered: number; percent: number };
+  contentQuality: ContentQualityItem[];
 }
 
 export function computeStats(graph: KnowledgeGraph): GraphStats {
@@ -75,6 +83,56 @@ export function computeStats(graph: KnowledgeGraph): GraphStats {
     graph.embeddings.vectors.has(id)
   ).length;
 
+  // Content quality scoring
+  const now = Date.now();
+  const contentQuality: ContentQualityItem[] = [];
+  for (const doc of graph.documents.values()) {
+    let score = 100;
+    const issues: string[] = [];
+
+    // Freshness: penalize stale docs
+    if (doc.lastUpdated) {
+      const age = now - new Date(doc.lastUpdated).getTime();
+      if (age > SIX_MONTHS_MS) {
+        score -= 15;
+        issues.push("stale (>6 months)");
+      }
+    } else {
+      score -= 10;
+      issues.push("no last_updated date");
+    }
+
+    // Completeness: word count vs type expectations
+    const minWords = doc.type === "summary" ? 20 : doc.type === "detail" ? 100 : 30;
+    if (doc.wordCount < minWords) {
+      score -= 20;
+      issues.push(`short content (${doc.wordCount} words, expected ${minWords}+)`);
+    }
+
+    // Link density
+    if (doc.related.length === 0) {
+      score -= 10;
+      issues.push("no related links");
+    }
+
+    // Tags
+    if (doc.tags.length === 0) {
+      score -= 15;
+      issues.push("no tags");
+    }
+
+    // Heading structure (for detail/reference docs)
+    if ((doc.type === "detail" || doc.type === "reference") && !doc.contentBody.includes("## ")) {
+      score -= 10;
+      issues.push("no section headings");
+    }
+
+    if (score < 100) {
+      contentQuality.push({ id: doc.id, score: Math.max(0, score), issues });
+    }
+  }
+  contentQuality.sort((a, b) => a.score - b.score);
+
   return {
     totalDocs,
     byType,
@@ -89,6 +147,7 @@ export function computeStats(graph: KnowledgeGraph): GraphStats {
       covered,
       percent: totalDocs > 0 ? Math.round((covered / totalDocs) * 100) : 0,
     },
+    contentQuality,
   };
 }
 
@@ -135,6 +194,17 @@ export function formatStats(stats: GraphStats): string {
   lines.push(
     `Embedding coverage: ${stats.embeddingCoverage.covered}/${stats.embeddingCoverage.total} (${stats.embeddingCoverage.percent}%)`
   );
+
+  if (stats.contentQuality.length > 0) {
+    lines.push("");
+    lines.push(`Content quality issues: ${stats.contentQuality.length} documents`);
+    for (const item of stats.contentQuality.slice(0, 10)) {
+      lines.push(`  ${item.id} (score: ${item.score}): ${item.issues.join(", ")}`);
+    }
+    if (stats.contentQuality.length > 10) {
+      lines.push(`  ... and ${stats.contentQuality.length - 10} more`);
+    }
+  }
 
   return lines.join("\n");
 }

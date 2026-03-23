@@ -10,44 +10,11 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { parse as parseYaml } from "yaml";
-import { collectMarkdownFiles } from "./loader.js";
+import { collectMarkdownFiles, parseFrontmatter } from "./loader.js";
 import { type EmbeddingProvider, LocalProvider, VoyageProvider } from "./embedding-provider.js";
 import { loadEmbeddingMeta, saveEmbeddingMeta } from "./embedding-meta.js";
 import { buildEmbeddingInput } from "./embeddings.js";
-
-interface DocFrontmatter {
-  id?: string;
-  title?: string;
-  domain?: string;
-  subdomain?: string;
-  tags?: string[];
-  body: string;
-}
-
-function parseFrontmatter(raw: string): DocFrontmatter {
-  const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!match) return { body: raw };
-  const fm = parseYaml(match[1]) as Record<string, unknown>;
-  return {
-    id: fm.id as string | undefined,
-    title: fm.title as string | undefined,
-    domain: fm.domain as string | undefined,
-    subdomain: fm.subdomain as string | undefined,
-    tags: fm.tags as string[] | undefined,
-    body: match[2].trim(),
-  };
-}
-
-function buildEmbeddingInputFromFrontmatter(doc: DocFrontmatter): string {
-  return buildEmbeddingInput({
-    title: doc.title ?? "",
-    domain: doc.domain,
-    subdomain: doc.subdomain,
-    tags: doc.tags ?? [],
-    contentBody: doc.body,
-  });
-}
+import { loadConfig } from "./config.js";
 
 interface DocForEmbedding {
   id: string;
@@ -56,20 +23,19 @@ interface DocForEmbedding {
 }
 
 function resolveProvider(knowledgeDir: string): EmbeddingProvider {
-  const configPath = join(knowledgeDir, "knowledge.config.yaml");
   let provider: string | undefined;
   let model: string | undefined;
   let apiKeyEnv: string | undefined;
   let cacheDir: string | undefined;
 
   try {
-    const raw = readFileSync(configPath, "utf-8");
-    const parsed = parseYaml(raw) as Record<string, unknown>;
-    const embeddings = parsed?.embeddings as Record<string, string> | undefined;
-    provider = embeddings?.provider;
-    model = embeddings?.model;
-    apiKeyEnv = embeddings?.api_key_env;
-    cacheDir = embeddings?.cache_dir;
+    const config = loadConfig(knowledgeDir);
+    if (config?.embeddings) {
+      provider = config.embeddings.provider;
+      model = config.embeddings.model;
+      apiKeyEnv = config.embeddings.api_key_env;
+      cacheDir = config.embeddings.cache_dir;
+    }
   } catch {
     // No config — use defaults
   }
@@ -130,13 +96,19 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
 
   for (const filePath of files) {
     const raw = readFileSync(filePath, "utf-8");
-    const parsed = parseFrontmatter(raw);
-    if (!parsed.id) continue;
+    const { frontmatter, body } = parseFrontmatter(raw);
+    if (!frontmatter.id) continue;
 
-    const text = buildEmbeddingInputFromFrontmatter(parsed);
+    const text = buildEmbeddingInput({
+      title: (frontmatter.title as string) ?? "",
+      domain: frontmatter.domain as string | undefined,
+      subdomain: frontmatter.subdomain as string | undefined,
+      tags: (frontmatter.tags as string[]) ?? [],
+      contentBody: body,
+    });
     const hash = createHash("sha256").update(text).digest("hex");
 
-    docs.push({ id: parsed.id, text, hash });
+    docs.push({ id: frontmatter.id as string, text, hash });
   }
 
   console.log(`Found ${docs.length} documents`);
