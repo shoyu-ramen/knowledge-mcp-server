@@ -36,7 +36,7 @@ Running `npx knowledge-mcp-server init` automatically creates a `.mcp.json` file
 }
 ```
 
-By default, the server uses a local embedding model (`Xenova/all-MiniLM-L6-v2`) for hybrid BM25 + vector search — no API keys required. The model is downloaded automatically on first use (~23MB).
+By default, the server uses a local embedding model (`BAAI/bge-small-en-v1.5`) for hybrid BM25 + vector search — no API keys required. The model is downloaded automatically on first use.
 
 ## CLI Reference
 
@@ -48,6 +48,8 @@ Commands:
   embeddings  Generate embeddings for all documents
   init        Scaffold a new knowledge/ directory with config template
   validate    Run graph integrity checks and report issues
+  stats       Display knowledge graph statistics
+  list        List documents with metadata filtering
 
 Options:
   --knowledge-dir <path>  Path to knowledge directory (default: ./knowledge)
@@ -80,8 +82,10 @@ Checks for: orphaned documents, broken references, circular parents, missing tag
 ```typescript
 import { createKnowledgeServer } from "knowledge-mcp-server";
 
-const { server, graph, tfidfIndex, config } = createKnowledgeServer("./knowledge");
+const { server, engine } = createKnowledgeServer("./knowledge");
 ```
+
+The `engine` is a `KnowledgeEngine` instance providing `search()`, `lookup()`, `write()`, `delete()`, `list()`, `validate()`, `stats()`, and `graphView()` methods.
 
 ### Exported Types
 
@@ -92,6 +96,7 @@ import type {
   KnowledgeDocument,
   KnowledgeConfig,
 } from "knowledge-mcp-server";
+import { KnowledgeEngine } from "knowledge-mcp-server";
 ```
 
 ## Document Format
@@ -181,7 +186,7 @@ synonyms:
 # Embedding configuration (local model by default, no API key needed)
 embeddings:
   provider: "local"                   # "local" (default) or "voyage"
-  model: "Xenova/all-MiniLM-L6-v2"   # local model (384 dims)
+  model: "BAAI/bge-small-en-v1.5"    # local model (384 dims, default)
   # cache_dir: "~/.cache/my-models"  # optional model cache override
 
 # To use Voyage AI instead:

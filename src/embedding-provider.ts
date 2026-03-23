@@ -20,15 +20,20 @@ export interface EmbeddingProvider {
 const LOCAL_MODEL_DIMS: Record<string, number> = {
   "Xenova/all-MiniLM-L6-v2": 384,
   "Xenova/all-MiniLM-L12-v2": 384,
+  "BAAI/bge-small-en-v1.5": 384,
   "nomic-ai/nomic-embed-text-v1.5": 768,
+  "Snowflake/snowflake-arctic-embed-m": 768,
 };
 
-const DEFAULT_LOCAL_MODEL = "Xenova/all-MiniLM-L6-v2";
+const DEFAULT_LOCAL_MODEL = "BAAI/bge-small-en-v1.5";
 const DEFAULT_LOCAL_DIMS = 384;
 
 // --- Local Provider (Transformers.js) ---
 
-type Pipeline = (texts: string | string[], options?: Record<string, unknown>) => Promise<{ tolist(): number[][] }>;
+type Pipeline = (
+  texts: string | string[],
+  options?: Record<string, unknown>
+) => Promise<{ tolist(): number[][] }>;
 
 export class LocalProvider implements EmbeddingProvider {
   readonly name = "local" as const;
@@ -41,9 +46,10 @@ export class LocalProvider implements EmbeddingProvider {
   constructor(model?: string, cacheDir?: string) {
     this.model = model || DEFAULT_LOCAL_MODEL;
     this.dimensions = LOCAL_MODEL_DIMS[this.model] ?? DEFAULT_LOCAL_DIMS;
-    this.cacheDir = cacheDir
-      || process.env.TRANSFORMERS_CACHE
-      || join(homedir(), ".cache", "knowledge-mcp-server", "models");
+    this.cacheDir =
+      cacheDir ||
+      process.env.TRANSFORMERS_CACHE ||
+      join(homedir(), ".cache", "knowledge-mcp-server", "models");
   }
 
   private async loadPipeline(): Promise<void> {
@@ -154,14 +160,12 @@ export class VoyageProvider implements EmbeddingProvider {
 
 let activeProvider: EmbeddingProvider | null = null;
 
-export function initEmbeddingProvider(
-  config?: {
-    provider?: string;
-    model?: string;
-    api_key_env?: string;
-    cache_dir?: string;
-  }
-): void {
+export function initEmbeddingProvider(config?: {
+  provider?: string;
+  model?: string;
+  api_key_env?: string;
+  cache_dir?: string;
+}): void {
   if (config?.provider === "voyage") {
     const envVar = config.api_key_env || "VOYAGE_API_KEY";
     const apiKey = process.env[envVar];
@@ -179,7 +183,7 @@ export function initEmbeddingProvider(
   }
 
   // Default: local provider
-  const model = config?.provider === "local" ? (config.model || undefined) : undefined;
+  const model = config?.provider === "local" ? config.model || undefined : undefined;
   activeProvider = new LocalProvider(model, config?.cache_dir);
   log.info("embedding_provider", { provider: "local", model: activeProvider.model });
 }

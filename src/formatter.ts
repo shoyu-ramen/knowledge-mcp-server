@@ -220,12 +220,19 @@ export function formatSearchResults(
   results: FormattedDoc[],
   detailLevel: DetailLevel = "normal",
   searchMethod?: string,
-  facets?: FacetCounts
+  facets?: FacetCounts,
+  confidence?: "high" | "medium" | "low"
 ): string {
   const methodAttr = searchMethod ? ` search_method="${escapeXml(searchMethod)}"` : "";
+  const confidenceAttr = confidence ? ` confidence="${confidence}"` : "";
   const parts = [
-    `<knowledge_context query="${escapeXml(query)}" total_docs="${results.length}"${methodAttr}>`,
+    `<knowledge_context query="${escapeXml(query)}" total_docs="${results.length}"${methodAttr}${confidenceAttr}>`,
   ];
+
+  // Facets first — actionable refinement hints before document content
+  if (facets) {
+    parts.push(formatFacets(facets));
+  }
 
   // Order: ancestors first, then primaries by similarity, then expanded
   const ancestors = results.filter((r) => r.relevance === "ancestor");
@@ -236,8 +243,31 @@ export function formatSearchResults(
     parts.push(formatSingleDoc(entry, detailLevel));
   }
 
-  if (facets) {
-    parts.push(formatFacets(facets));
+  parts.push(`</knowledge_context>`);
+  return parts.join("\n");
+}
+
+export function formatBatchLookupResult(
+  docs: KnowledgeDocument[],
+  ancestors: KnowledgeDocument[],
+  related: KnowledgeDocument[],
+  contentLevel: "full" | "summary" = "full"
+): string {
+  const detailLevel: DetailLevel = contentLevel === "summary" ? "normal" : "full";
+  const parts = [
+    `<knowledge_context total_docs="${docs.length + ancestors.length + related.length}">`,
+  ];
+
+  for (const a of ancestors) {
+    parts.push(formatSingleDoc({ doc: a, relevance: "ancestor" }, detailLevel));
+  }
+
+  for (const doc of docs) {
+    parts.push(formatSingleDoc({ doc, relevance: "primary" }, detailLevel));
+  }
+
+  for (const r of related) {
+    parts.push(formatSingleDoc({ doc: r, relevance: "graph-expanded" }, detailLevel));
   }
 
   parts.push(`</knowledge_context>`);

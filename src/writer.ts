@@ -73,9 +73,7 @@ function validateWriteParams(
   for (const p of params.phase) {
     if (validPhaseIds) {
       if (!validPhaseIds.includes(p)) {
-        throw new Error(
-          `Invalid phase value ${p}. Must be one of: ${validPhaseIds.join(", ")}`
-        );
+        throw new Error(`Invalid phase value ${p}. Must be one of: ${validPhaseIds.join(", ")}`);
       }
     } else if (p < 1 || !Number.isInteger(p)) {
       throw new Error(`Invalid phase value ${p}. Must be a positive integer.`);
@@ -357,6 +355,31 @@ export function writeDocument(
     tfidfIndex,
     warnings,
   };
+}
+
+/** Preview the impact of deleting a document without actually deleting it */
+export function previewDelete(graph: KnowledgeGraph, id: string): { warnings: string[] } {
+  const doc = graph.documents.get(id);
+  if (!doc) {
+    throw new Error(`Document not found: "${id}".`);
+  }
+
+  const warnings: string[] = [`DRY RUN — document "${id}" would be deleted.`];
+
+  if (doc.childrenIds.length > 0) {
+    warnings.push(
+      `Document has ${doc.childrenIds.length} children that would be orphaned: ${doc.childrenIds.join(", ")}`
+    );
+  }
+
+  const backlinks = graph.backlinkIndex.get(id);
+  if (backlinks) {
+    for (const sourceId of backlinks) {
+      warnings.push(`Document "${sourceId}" has a related reference to this document.`);
+    }
+  }
+
+  return { warnings };
 }
 
 export function deleteDocument(

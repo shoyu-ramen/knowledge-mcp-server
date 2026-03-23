@@ -82,9 +82,9 @@ describe("classifyQuery generic behavior", () => {
     expect(result.domains).toEqual([]);
   });
 
-  it("classifies as broad when no domains matched", () => {
+  it("classifies as specific when no domains matched (not broad)", () => {
     const result = classifyQuery("CREPE pitch detection", EMPTY_CONFIG);
-    expect(result.queryType).toBe("broad");
+    expect(result.queryType).toBe("specific");
   });
 });
 

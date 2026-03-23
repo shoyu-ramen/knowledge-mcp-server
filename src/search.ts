@@ -1,7 +1,14 @@
 import type { KnowledgeGraph } from "./graph.js";
 import { getAncestors, getRelated } from "./graph.js";
 import { classifyQuery, expandSynonyms, type ClassifierConfig } from "./query-classifier.js";
-import { cosineSimilarity, embedQuery, bm25Score, tokenize, type Bm25Index } from "./embeddings.js";
+import {
+  cosineSimilarity,
+  dotProduct,
+  embedQuery,
+  bm25Score,
+  tokenize,
+  type Bm25Index,
+} from "./embeddings.js";
 import {
   formatSearchResults,
   type FormattedDoc,
@@ -134,9 +141,6 @@ function detectMatchedOn(query: string, doc: KnowledgeDocument): string {
   return parts.length > 0 ? parts.join("+") : "semantic";
 }
 
-// Reciprocal Rank Fusion constant
-const RRF_K = 60;
-
 // Stage 3: Hybrid scoring — vector + BM25 merged via RRF when embeddings available
 async function scoreDocuments(
   graph: KnowledgeGraph,
@@ -166,14 +170,21 @@ async function scoreDocuments(
   }
 
   if (queryVector) {
-    // Hybrid: compute vector scores, merge with RRF
+    // Adaptive RRF k: smaller for small corpora, capped at 60
+    const rrfK = Math.min(60, Math.max(5, Math.floor(candidates.size / 5)));
+
+    // Hybrid: compute vector scores only for docs with embeddings
+    const similarityFn = graph.embeddings.normalized ? dotProduct : cosineSimilarity;
     const vectorScored: ScoredDoc[] = [];
     for (const id of candidates) {
       const docVector = graph.embeddings.vectors.get(id);
       const doc = graph.documents.get(id);
       if (!doc) continue;
-      const score = docVector ? cosineSimilarity(queryVector, docVector) : 0;
-      vectorScored.push({ doc, score });
+      // Skip unembedded docs from vector ranking to avoid distorting RRF
+      if (docVector) {
+        const score = similarityFn(queryVector, docVector);
+        vectorScored.push({ doc, score });
+      }
     }
     vectorScored.sort((a, b) => b.score - a.score);
 
@@ -187,15 +198,18 @@ async function scoreDocuments(
       bm25Rank.set(bm25Scored[i].doc.id, i + 1);
     }
 
-    // Merge via RRF
+    // Merge via RRF — docs without vector rank only get BM25 contribution
     const merged: ScoredDoc[] = [];
     const allIds = new Set([...vectorRank.keys(), ...bm25Rank.keys()]);
     for (const id of allIds) {
       const doc = graph.documents.get(id);
       if (!doc) continue;
-      const vr = vectorRank.get(id) ?? vectorScored.length + 1;
       const br = bm25Rank.get(id) ?? bm25Scored.length + 1;
-      const score = 1 / (RRF_K + vr) + 1 / (RRF_K + br);
+      let score = 1 / (rrfK + br);
+      const vr = vectorRank.get(id);
+      if (vr !== undefined) {
+        score += 1 / (rrfK + vr);
+      }
       merged.push({ doc, score });
     }
     merged.sort((a, b) => b.score - a.score);
@@ -285,10 +299,17 @@ function expandResults(
     }
   }
 
-  // Sort related by score, take up to budget
-  relatedCandidates.sort((a, b) => b.score - a.score);
+  // Deduplicate relatedCandidates by ID, keeping highest-scoring occurrence
+  const bestRelated = new Map<string, (typeof relatedCandidates)[0]>();
+  for (const rc of relatedCandidates) {
+    const existing = bestRelated.get(rc.doc.id);
+    if (!existing || rc.score > existing.score) bestRelated.set(rc.doc.id, rc);
+  }
+  const dedupedRelated = [...bestRelated.values()].sort((a, b) => b.score - a.score);
+
+  // Take up to budget
   const budget = maxTotal - formattedDocs.length;
-  const relatedToAdd = relatedCandidates.slice(0, Math.min(maxRelated, budget));
+  const relatedToAdd = dedupedRelated.slice(0, Math.min(maxRelated, budget));
 
   for (const { doc, score, sourceId } of relatedToAdd) {
     if (!seen.has(doc.id)) {
@@ -327,7 +348,13 @@ export async function knowledgeSearch(
     scored: rawScored,
     queryVector,
     searchMethod,
-  } = await scoreDocuments(graph, candidates, options.query, bm25Index, classifierConfig.synonymMap);
+  } = await scoreDocuments(
+    graph,
+    candidates,
+    options.query,
+    bm25Index,
+    classifierConfig.synonymMap
+  );
 
   // Re-rank top candidates (title match, decision boost, staleness, exact phrase)
   const reranked = rerank(rawScored.slice(0, 20), options.query, queryType);
@@ -396,6 +423,22 @@ export async function knowledgeSearch(
     ms: Date.now() - searchStart,
   });
 
+  // Compute search confidence based on top result score
+  const topScore = topResults.length > 0 ? topResults[0].score : 0;
+  let confidence: "high" | "medium" | "low";
+  if (searchMethod === "vector+bm25") {
+    confidence = topScore > 0.04 ? "high" : topScore > 0.025 ? "medium" : "low";
+  } else {
+    confidence = topScore > 5 ? "high" : topScore > 2 ? "medium" : "low";
+  }
+
   // Stage 5: Format for Claude
-  return formatSearchResults(options.query, formatted, detailLevel, searchMethod, facets);
+  return formatSearchResults(
+    options.query,
+    formatted,
+    detailLevel,
+    searchMethod,
+    facets,
+    confidence
+  );
 }

@@ -119,6 +119,63 @@ function validateFrontmatter(
   return warnings;
 }
 
+/** Load a single document from a file path. Returns null if the file has no valid id. */
+export function loadSingleDocument(
+  filePath: string,
+  knowledgeDir: string,
+  validDomains?: string[] | null
+): KnowledgeDocument | null {
+  const raw = readFileSync(filePath, "utf-8");
+  const { frontmatter, body } = parseFrontmatter(raw);
+
+  const validationWarnings = validateFrontmatter(frontmatter, filePath, validDomains);
+  if (validationWarnings.length > 0) {
+    for (const w of validationWarnings) log.warn("schema_validation", { warning: w });
+  }
+  if (!frontmatter.id) return null;
+
+  const id = frontmatter.id;
+  const phase = frontmatter.phase
+    ? Array.isArray(frontmatter.phase)
+      ? frontmatter.phase
+      : [frontmatter.phase]
+    : [];
+
+  const rawStatus =
+    frontmatter.status || (frontmatter.decision_status === "deprecated" ? "deprecated" : undefined);
+  const status: KnowledgeDocument["status"] =
+    rawStatus === "draft" ? "draft" : rawStatus === "deprecated" ? "deprecated" : "active";
+
+  const rawDecisionStatus = frontmatter.decision_status as string | undefined;
+  const validDecisionStatuses = ["proposed", "accepted", "deprecated", "superseded", "finalized"];
+  const decisionStatus =
+    rawDecisionStatus && validDecisionStatuses.includes(rawDecisionStatus)
+      ? (rawDecisionStatus as KnowledgeDocument["decisionStatus"])
+      : undefined;
+
+  return {
+    id,
+    title: frontmatter.title || id,
+    type: (frontmatter.type as KnowledgeDocument["type"]) || "detail",
+    domain: frontmatter.domain || id.split("/")[0],
+    subdomain: frontmatter.subdomain,
+    tags: frontmatter.tags || [],
+    phase,
+    related: frontmatter.related || [],
+    parentId: deriveParentId(id),
+    childrenIds: frontmatter.children || [],
+    contentBody: body,
+    filePath: relative(join(knowledgeDir, ".."), filePath),
+    wordCount: frontmatter.word_count || body.split(/\s+/).filter(Boolean).length,
+    status,
+    supersededBy: frontmatter.superseded_by,
+    lastUpdated: frontmatter.last_updated,
+    decisionStatus,
+    alternativesConsidered: frontmatter.alternatives_considered,
+    decisionDate: frontmatter.decision_date,
+  };
+}
+
 export function loadDocuments(
   knowledgeDir: string,
   validDomains?: string[] | null

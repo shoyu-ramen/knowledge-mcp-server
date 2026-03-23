@@ -543,6 +543,137 @@ Content that should be skipped.`,
     });
   });
 
+  // -----------------------------------------------------------------------
+  // List
+  // -----------------------------------------------------------------------
+
+  describe("list tool", () => {
+    it("list-all: returns all documents", async () => {
+      createFixtures(tmpDir);
+      const { client } = await startClient(tmpDir);
+
+      const result = await client.callTool({
+        name: "knowledge_list",
+        arguments: {},
+      });
+
+      const text = textOf(result);
+      expect(text).toContain("technology/audio");
+      expect(text).toContain("Audio Processing");
+    });
+
+    it("list-filtered: filters by domain", async () => {
+      createFixtures(tmpDir);
+      const { client } = await startClient(tmpDir);
+
+      const result = await client.callTool({
+        name: "knowledge_list",
+        arguments: { domain: "technology" },
+      });
+
+      const text = textOf(result);
+      expect(text).toContain("technology");
+    });
+
+    it("list-title-search: filters by title substring", async () => {
+      createFixtures(tmpDir);
+      const { client } = await startClient(tmpDir);
+
+      const result = await client.callTool({
+        name: "knowledge_list",
+        arguments: { title_search: "Audio" },
+      });
+
+      const text = textOf(result);
+      expect(text).toContain("Audio Processing");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Validate
+  // -----------------------------------------------------------------------
+
+  describe("validate tool", () => {
+    it("validate: returns integrity report", async () => {
+      createFixtures(tmpDir);
+      const { client } = await startClient(tmpDir);
+
+      const result = await client.callTool({
+        name: "knowledge_validate",
+        arguments: {},
+      });
+
+      const text = textOf(result);
+      // Should contain validation output (issues or "no issues")
+      expect(text.length).toBeGreaterThan(0);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Stats
+  // -----------------------------------------------------------------------
+
+  describe("stats tool", () => {
+    it("stats: returns knowledge graph metrics", async () => {
+      createFixtures(tmpDir);
+      const { client } = await startClient(tmpDir);
+
+      const result = await client.callTool({
+        name: "knowledge_stats",
+        arguments: {},
+      });
+
+      const text = textOf(result);
+      expect(text).toContain("Total documents");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Delete dry-run
+  // -----------------------------------------------------------------------
+
+  describe("delete dry-run", () => {
+    it("dry-run: previews deletion without removing document", async () => {
+      createFixtures(tmpDir);
+      const { client } = await startClient(tmpDir);
+
+      const result = await client.callTool({
+        name: "knowledge_delete",
+        arguments: { id: "technology/audio", dry_run: true },
+      });
+
+      const text = textOf(result);
+      expect(text).toContain("DRY RUN");
+
+      // Verify doc still exists
+      const lookup = await client.callTool({
+        name: "knowledge_lookup",
+        arguments: { id: "technology/audio" },
+      });
+      expect(textOf(lookup)).toContain("Audio Processing");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Batch Lookup
+  // -----------------------------------------------------------------------
+
+  describe("batch lookup", () => {
+    it("batch: retrieves multiple documents by ID array", async () => {
+      createFixtures(tmpDir);
+      const { client } = await startClient(tmpDir);
+
+      const result = await client.callTool({
+        name: "knowledge_lookup",
+        arguments: { id: ["technology/audio", "technology"] },
+      });
+
+      const text = textOf(result);
+      expect(text).toContain("Audio Processing");
+      expect(text).toContain("Technology");
+    });
+  });
+
   describe("zero-config mode", () => {
     it("accepts any domain when no config file present", async () => {
       createFixtures(tmpDir, { includeConfig: false });

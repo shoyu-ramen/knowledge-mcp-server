@@ -24,11 +24,13 @@ export function rerank(
     .map(({ doc, score }) => {
       let adjusted = score;
 
-      // Title match bonus: query tokens found in title
+      // Title match bonus: use max of precision (overlap/titleLength) and recall (overlap/queryLength)
       const titleTokens = tokenize(doc.title);
       const titleOverlap = titleTokens.filter((t) => queryTokenSet.has(t)).length;
       if (titleOverlap > 0) {
-        adjusted += 0.15 * (titleOverlap / Math.max(queryTokenSet.size, 1));
+        const titlePrecision = titleOverlap / Math.max(titleTokens.length, 1);
+        const titleRecall = titleOverlap / Math.max(queryTokenSet.size, 1);
+        adjusted += 0.15 * Math.max(titlePrecision, titleRecall);
       }
 
       // Decision-type boost when query is decision-oriented

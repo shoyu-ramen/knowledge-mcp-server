@@ -19,7 +19,7 @@ describe("initEmbeddingProvider", () => {
     const provider = getEmbeddingProvider();
     expect(provider).not.toBeNull();
     expect(provider!.name).toBe("local");
-    expect(provider!.model).toBe("Xenova/all-MiniLM-L6-v2");
+    expect(provider!.model).toBe("BAAI/bge-small-en-v1.5");
     expect(provider!.dimensions).toBe(384);
   });
 

@@ -66,7 +66,7 @@ export function makeGraph(docs: KnowledgeDocument[]): KnowledgeGraph {
 
   return {
     documents,
-    embeddings: { vectors: new Map(), available: false },
+    embeddings: { vectors: new Map(), available: false, normalized: true },
     tagIndex,
     domainIndex,
     phaseIndex,

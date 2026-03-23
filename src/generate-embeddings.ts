@@ -12,12 +12,9 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { collectMarkdownFiles } from "./loader.js";
-import {
-  type EmbeddingProvider,
-  LocalProvider,
-  VoyageProvider,
-} from "./embedding-provider.js";
+import { type EmbeddingProvider, LocalProvider, VoyageProvider } from "./embedding-provider.js";
 import { loadEmbeddingMeta, saveEmbeddingMeta } from "./embedding-meta.js";
+import { buildEmbeddingInput } from "./embeddings.js";
 
 interface DocFrontmatter {
   id?: string;
@@ -42,15 +39,14 @@ function parseFrontmatter(raw: string): DocFrontmatter {
   };
 }
 
-function buildEmbeddingInput(doc: DocFrontmatter): string {
-  const parts: string[] = [];
-  if (doc.title) parts.push(doc.title);
-  const domainPart = [doc.domain, doc.subdomain].filter(Boolean).join("/");
-  if (domainPart) parts.push(`Domain: ${domainPart}`);
-  if (doc.tags?.length) parts.push(`Tags: ${doc.tags.join(", ")}`);
-  parts.push("");
-  parts.push(doc.body);
-  return parts.join("\n");
+function buildEmbeddingInputFromFrontmatter(doc: DocFrontmatter): string {
+  return buildEmbeddingInput({
+    title: doc.title ?? "",
+    domain: doc.domain,
+    subdomain: doc.subdomain,
+    tags: doc.tags ?? [],
+    contentBody: doc.body,
+  });
 }
 
 interface DocForEmbedding {
@@ -104,7 +100,9 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
   const hashesPath = join(knowledgeDir, ".embeddings-hashes.json");
 
   console.log(`Knowledge dir: ${knowledgeDir}`);
-  console.log(`Embedding provider: ${provider.name} (${provider.model}, ${provider.dimensions} dims)`);
+  console.log(
+    `Embedding provider: ${provider.name} (${provider.model}, ${provider.dimensions} dims)`
+  );
 
   // Load existing embeddings and hashes
   let existingEmbeddings: Record<string, number[]> = {};
@@ -135,7 +133,7 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
     const parsed = parseFrontmatter(raw);
     if (!parsed.id) continue;
 
-    const text = buildEmbeddingInput(parsed);
+    const text = buildEmbeddingInputFromFrontmatter(parsed);
     const hash = createHash("sha256").update(text).digest("hex");
 
     docs.push({ id: parsed.id, text, hash });
@@ -144,11 +142,11 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
   console.log(`Found ${docs.length} documents`);
 
   // Find docs that need (re-)embedding
-  const toEmbed = docs.filter(
-    (d) => !existingHashes[d.id] || existingHashes[d.id] !== d.hash
-  );
+  const toEmbed = docs.filter((d) => !existingHashes[d.id] || existingHashes[d.id] !== d.hash);
 
-  console.log(`${toEmbed.length} documents need embedding (${docs.length - toEmbed.length} cached)`);
+  console.log(
+    `${toEmbed.length} documents need embedding (${docs.length - toEmbed.length} cached)`
+  );
 
   if (toEmbed.length === 0) {
     console.log("All embeddings up to date!");
@@ -168,8 +166,10 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
 
     const vectors = await provider.embedDocuments(batch.map((d) => d.text));
     for (let j = 0; j < batch.length; j++) {
-      newEmbeddings[batch[j].id] = vectors[j];
-      newHashes[batch[j].id] = batch[j].hash;
+      if (j < vectors.length && vectors[j]) {
+        newEmbeddings[batch[j].id] = vectors[j];
+        newHashes[batch[j].id] = batch[j].hash;
+      }
     }
   }
 
@@ -177,8 +177,8 @@ export async function generateEmbeddings(knowledgeDir: string): Promise<void> {
   const validIds = new Set(docs.map((d) => d.id));
   for (const id of Object.keys(newEmbeddings)) {
     if (!validIds.has(id)) {
-      delete newEmbeddings[id];
-      delete newHashes[id];
+      Reflect.deleteProperty(newEmbeddings, id);
+      Reflect.deleteProperty(newHashes, id);
     }
   }
 

@@ -2,22 +2,24 @@
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { createKnowledgeServer } from "./index.js";
+import { KnowledgeEngine } from "./engine.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { buildGraph } from "./graph.js";
-import { validateGraph, formatValidationReport } from "./validator.js";
-import { loadConfig, getEffectiveDomains } from "./config.js";
+import { formatValidationReport } from "./validator.js";
+import { formatStats } from "./analytics.js";
 import { generateEmbeddings } from "./generate-embeddings.js";
 import { initKnowledgeDir } from "./init.js";
 import { log } from "./logger.js";
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 
-const COMMANDS = ["serve", "embeddings", "init", "validate"] as const;
+const COMMANDS = ["serve", "embeddings", "init", "validate", "stats", "list"] as const;
 type Command = (typeof COMMANDS)[number];
 
 interface ParsedArgs {
   command: Command;
   knowledgeDir: string;
+  domain?: string;
+  type?: string;
 }
 
 function printUsage(): void {
@@ -30,6 +32,8 @@ Commands:
   embeddings  Generate embeddings for all documents
   init        Scaffold a new knowledge/ directory with config template
   validate    Run graph integrity checks and report issues
+  stats       Show knowledge graph statistics
+  list        List documents with metadata (supports --domain, --type filters)
 
 Options:
   --knowledge-dir <path>  Path to knowledge directory (default: ./knowledge)
@@ -47,9 +51,16 @@ function parseArgs(argv: string[]): ParsedArgs {
     command = args.shift()! as Command;
   }
 
+  let domain: string | undefined;
+  let type: string | undefined;
+
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--knowledge-dir" && args[i + 1]) {
       knowledgeDir = resolve(args[++i]);
+    } else if (args[i] === "--domain" && args[i + 1]) {
+      domain = args[++i];
+    } else if (args[i] === "--type" && args[i + 1]) {
+      type = args[++i];
     } else if (args[i] === "--help" || args[i] === "-h") {
       printUsage();
       process.exit(0);
@@ -59,7 +70,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { command, knowledgeDir };
+  return { command, knowledgeDir, domain, type };
 }
 
 async function serve(knowledgeDir: string): Promise<void> {
@@ -75,10 +86,8 @@ function validate(knowledgeDir: string): void {
     process.exit(1);
   }
 
-  const config = loadConfig(knowledgeDir);
-  const validDomains = getEffectiveDomains(config, knowledgeDir);
-  const graph = buildGraph(knowledgeDir, validDomains);
-  const report = validateGraph(graph);
+  const engine = new KnowledgeEngine(knowledgeDir);
+  const report = engine.validate();
   console.log(formatValidationReport(report));
 
   const hasIssues =
@@ -92,8 +101,35 @@ function validate(knowledgeDir: string): void {
   }
 }
 
+function stats(knowledgeDir: string): void {
+  if (!existsSync(knowledgeDir)) {
+    console.error(`Error: Knowledge directory not found: ${knowledgeDir}`);
+    process.exit(1);
+  }
+
+  const engine = new KnowledgeEngine(knowledgeDir);
+  console.log(formatStats(engine.stats()));
+}
+
+function list(knowledgeDir: string, domain?: string, type?: string): void {
+  if (!existsSync(knowledgeDir)) {
+    console.error(`Error: Knowledge directory not found: ${knowledgeDir}`);
+    process.exit(1);
+  }
+
+  const engine = new KnowledgeEngine(knowledgeDir);
+  const result = engine.list({ domain, type });
+
+  console.log(`Documents: ${result.docs.length} of ${result.totalDocs}`);
+  for (const doc of result.docs) {
+    console.log(
+      `  ${doc.id}  [${doc.type}]  "${doc.title}"  tags: ${doc.tags.join(", ") || "(none)"}`
+    );
+  }
+}
+
 async function main(): Promise<void> {
-  const { command, knowledgeDir } = parseArgs(process.argv);
+  const { command, knowledgeDir, domain, type } = parseArgs(process.argv);
 
   switch (command) {
     case "serve":
@@ -107,6 +143,12 @@ async function main(): Promise<void> {
       break;
     case "validate":
       validate(knowledgeDir);
+      break;
+    case "stats":
+      stats(knowledgeDir);
+      break;
+    case "list":
+      list(knowledgeDir, domain, type);
       break;
   }
 }

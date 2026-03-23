@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { KnowledgeDocument } from "./loader.js";
@@ -8,20 +8,21 @@ import { getEmbeddingProvider } from "./embedding-provider.js";
 export interface EmbeddingsStore {
   vectors: Map<string, number[]>;
   available: boolean;
+  normalized: boolean;
 }
 
 export function loadEmbeddings(knowledgeDir: string): EmbeddingsStore {
   const embeddingsPath = join(knowledgeDir, ".embeddings.json");
   if (!existsSync(embeddingsPath)) {
-    return { vectors: new Map(), available: false };
+    return { vectors: new Map(), available: false, normalized: true };
   }
 
   try {
     const raw = JSON.parse(readFileSync(embeddingsPath, "utf-8")) as Record<string, number[]>;
     const vectors = new Map(Object.entries(raw));
-    return { vectors, available: vectors.size > 0 };
+    return { vectors, available: vectors.size > 0, normalized: true };
   } catch {
-    return { vectors: new Map(), available: false };
+    return { vectors: new Map(), available: false, normalized: true };
   }
 }
 
@@ -39,13 +40,28 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
+/** Fast dot product for pre-normalized vectors (skips norm computation) */
+export function dotProduct(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+  }
+  return dot;
+}
+
 // --- Query embedding LRU cache (256 entries, ~512KB) ---
 
 const CACHE_MAX = 256;
 const queryCache = new Map<string, number[]>();
+let cacheProviderKey = "";
 
 function normalizeQuery(q: string): string {
-  return q.toLowerCase().trim().replace(/\s+/g, " ");
+  return q
+    .toLowerCase()
+    .trim()
+    .replace(/[?!.,;:]+$/g, "")
+    .replace(/\s+/g, " ");
 }
 
 // --- Exponential backoff for remote API failures ---
@@ -58,6 +74,13 @@ const BACKOFF_MAX_LOCAL = 5_000;
 export async function embedQuery(query: string): Promise<number[] | null> {
   const provider = getEmbeddingProvider();
   if (!provider) return null;
+
+  // Invalidate cache if provider changed (e.g., model upgrade)
+  const providerKey = `${provider.name}/${provider.model}`;
+  if (providerKey !== cacheProviderKey) {
+    queryCache.clear();
+    cacheProviderKey = providerKey;
+  }
 
   const key = normalizeQuery(query);
   const cached = queryCache.get(key);
@@ -501,6 +524,29 @@ export function updateBm25Index(
   index.idf = computeIdf(index.docFreq, index.docCount);
 }
 
+// --- Embedding Input Format (shared between inline and batch embedding) ---
+
+// Max characters for embedding input — prevents silent model-level truncation
+const MAX_EMBEDDING_CHARS = 4000;
+
+export function buildEmbeddingInput(doc: {
+  title: string;
+  domain?: string;
+  subdomain?: string;
+  tags: string[];
+  contentBody: string;
+}): string {
+  const parts: string[] = [];
+  if (doc.title) parts.push(doc.title);
+  const domainPart = [doc.domain, doc.subdomain].filter(Boolean).join("/");
+  if (domainPart) parts.push(`Domain: ${domainPart}`);
+  if (doc.tags.length > 0) parts.push(`Tags: ${doc.tags.join(", ")}`);
+  parts.push("");
+  parts.push(doc.contentBody);
+  const text = parts.join("\n");
+  return text.length > MAX_EMBEDDING_CHARS ? text.slice(0, MAX_EMBEDDING_CHARS) : text;
+}
+
 // --- Inline Embedding ---
 
 export async function embedSingleDocument(
@@ -515,7 +561,7 @@ export async function embedSingleDocument(
   if (provider.name === "voyage" && Date.now() < backoffUntil) return;
 
   try {
-    const text = `${doc.title}\n${doc.tags.join(", ")}\n${doc.contentBody}`;
+    const text = buildEmbeddingInput(doc);
     const vectors = await provider.embedDocuments([text]);
     const vector = vectors[0];
     if (!vector) return;
@@ -576,7 +622,23 @@ function persistEmbeddings(store: EmbeddingsStore, knowledgeDir: string): void {
   }, 5000);
 }
 
-// Flush on process exit
+// Flush on process exit — use synchronous write in "exit" handler since async is unreliable
 process.on("beforeExit", () => {
   flushEmbeddings();
+});
+
+process.on("exit", () => {
+  if (!pendingFlush) return;
+  const { store, knowledgeDir } = pendingFlush;
+  pendingFlush = null;
+  try {
+    const embeddingsPath = join(knowledgeDir, ".embeddings.json");
+    const obj: Record<string, number[]> = {};
+    for (const [id, vec] of store.vectors) {
+      obj[id] = vec;
+    }
+    writeFileSync(embeddingsPath, JSON.stringify(obj), "utf-8");
+  } catch {
+    // Best-effort — process is exiting
+  }
 });

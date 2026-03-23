@@ -47,7 +47,27 @@ export function buildClassifierConfig(config: KnowledgeConfig | null): Classifie
     }
   }
 
-  const synonymMap = config?.synonyms ?? {};
+  // Build bidirectional synonym map from config
+  const rawSynonyms = config?.synonyms ?? {};
+  const synonymMap: Record<string, string[]> = {};
+  for (const [key, values] of Object.entries(rawSynonyms)) {
+    // Forward: key → values
+    if (!synonymMap[key]) synonymMap[key] = [];
+    for (const v of values) {
+      if (!synonymMap[key].includes(v)) synonymMap[key].push(v);
+    }
+    // Reverse: each value → [key, ...other values]
+    for (const v of values) {
+      const vLower = v.toLowerCase();
+      if (!synonymMap[vLower]) synonymMap[vLower] = [];
+      if (!synonymMap[vLower].includes(key)) synonymMap[vLower].push(key);
+      for (const other of values) {
+        if (other.toLowerCase() !== vLower && !synonymMap[vLower].includes(other)) {
+          synonymMap[vLower].push(other);
+        }
+      }
+    }
+  }
 
   return { domainKeywords, phasePatterns, synonymMap };
 }
@@ -56,6 +76,7 @@ export function buildClassifierConfig(config: KnowledgeConfig | null): Classifie
 const DECISION_KEYWORDS = [
   "why did we",
   "why do we",
+  "why not",
   "decision",
   "chose",
   "choose",
@@ -64,8 +85,12 @@ const DECISION_KEYWORDS = [
   "vs",
   "versus",
   "compared to",
+  "compared with",
   "alternative",
   "rationale",
+  "reason for",
+  "how did we decide",
+  "pros and cons",
 ];
 
 export function expandSynonyms(query: string, synonymMap: Record<string, string[]>): string {
@@ -73,6 +98,16 @@ export function expandSynonyms(query: string, synonymMap: Record<string, string[
   const tokens = lower.split(/\s+/);
   const expansions: string[] = [];
 
+  // Bigram pass: check two-token phrases first (e.g., "tech stack")
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const bigram = `${tokens[i].replace(/[^a-z0-9-]/g, "")} ${tokens[i + 1].replace(/[^a-z0-9-]/g, "")}`;
+    const synonyms = synonymMap[bigram];
+    if (synonyms) {
+      expansions.push(...synonyms);
+    }
+  }
+
+  // Single-token pass
   for (const token of tokens) {
     const clean = token.replace(/[^a-z0-9-]/g, "");
     const synonyms = synonymMap[clean];
@@ -127,8 +162,7 @@ export function classifyQuery(query: string, config: ClassifierConfig): QueryCla
     lower.startsWith("what is") ||
     lower.startsWith("overview") ||
     lower.startsWith("explain") ||
-    lower.includes("tell me about") ||
-    domains.length === 0
+    lower.includes("tell me about")
   ) {
     queryType = "broad";
   }

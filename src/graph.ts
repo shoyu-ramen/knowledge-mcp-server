@@ -106,10 +106,7 @@ export function loadTagTaxonomy(knowledgeDir: string): TagTaxonomy | null {
   }
 }
 
-export function buildGraph(
-  knowledgeDir: string,
-  validDomains?: string[] | null
-): KnowledgeGraph {
+export function buildGraph(knowledgeDir: string, validDomains?: string[] | null): KnowledgeGraph {
   const documents = loadDocuments(knowledgeDir, validDomains);
   const embeddings = loadEmbeddings(knowledgeDir);
 
