@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { formatGraphResult, formatSearchResults, formatLookupResult } from "../src/formatter.js";
+import {
+  formatGraphResult,
+  formatSearchResults,
+  formatLookupResult,
+  formatBatchLookupResult,
+} from "../src/formatter.js";
 import { makeDoc } from "./helpers.js";
 
 describe("truncateContent (via formatSearchResults)", () => {
@@ -94,5 +99,116 @@ describe("decision metadata", () => {
     const doc = makeDoc({ type: "detail" });
     const result = formatLookupResult(doc, [], []);
     expect(result).not.toContain("decision_meta");
+  });
+});
+
+describe("compact detail level", () => {
+  // Use multiple sections so truncation can cut between them
+  const longContent = Array.from({ length: 5 }, (_, i) =>
+    `## Section ${i + 1}\n\n${"word ".repeat(80).trim()}`
+  ).join("\n\n");
+
+  it("truncates primary docs to ~200 words", () => {
+    const doc = makeDoc({ contentBody: longContent });
+    const result = formatSearchResults(
+      "test",
+      [{ doc, relevance: "primary" }],
+      "compact"
+    );
+    expect(result).toContain("<content>");
+    // With 5 sections of ~80 words each and budget of 200, some must be omitted
+    expect(result).toContain("[Sections omitted:");
+  });
+
+  it("omits content element for ancestors", () => {
+    const doc = makeDoc({ contentBody: longContent });
+    const result = formatSearchResults(
+      "test",
+      [{ doc, relevance: "ancestor" }],
+      "compact"
+    );
+    expect(result).not.toContain("<content>");
+    // Should still have title
+    expect(result).toContain("<title>");
+  });
+
+  it("omits content element for graph-expanded docs", () => {
+    const doc = makeDoc({ contentBody: longContent });
+    const result = formatSearchResults(
+      "test",
+      [{ doc, relevance: "graph-expanded" }],
+      "compact"
+    );
+    expect(result).not.toContain("<content>");
+    expect(result).toContain("<title>");
+  });
+});
+
+describe("verbose flag", () => {
+  it("omits debug metadata by default", () => {
+    const doc = makeDoc({ filePath: "knowledge/test/doc.md" });
+    const result = formatSearchResults(
+      "test",
+      [{ doc, relevance: "primary", similarity: 0.85, matchedOn: "title+body", scoringMethod: "vector+bm25" }],
+      "normal"
+    );
+    expect(result).not.toContain("similarity=");
+    expect(result).not.toContain("matched_on=");
+    expect(result).not.toContain("scoring_method=");
+    expect(result).not.toContain("path=");
+  });
+
+  it("includes debug metadata when verbose=true", () => {
+    const doc = makeDoc({ filePath: "knowledge/test/doc.md" });
+    const result = formatSearchResults(
+      "test",
+      [{ doc, relevance: "primary", similarity: 0.85, matchedOn: "title+body", scoringMethod: "vector+bm25" }],
+      "normal",
+      undefined,
+      undefined,
+      undefined,
+      true
+    );
+    expect(result).toContain('similarity="0.85"');
+    expect(result).toContain('matched_on="title+body"');
+    expect(result).toContain('scoring_method="vector+bm25"');
+    expect(result).toContain("path=");
+  });
+
+  it("always includes id, type, and relevance attributes", () => {
+    const doc = makeDoc();
+    const result = formatSearchResults(
+      "test",
+      [{ doc, relevance: "primary" }],
+      "normal"
+    );
+    expect(result).toContain("id=");
+    expect(result).toContain("type=");
+    expect(result).toContain("relevance=");
+  });
+});
+
+describe("lookup ancestor capping", () => {
+  // Multiple sections so truncation can cut between them
+  const longContent = Array.from({ length: 5 }, (_, i) =>
+    `## Section ${i + 1}\n\n${"word ".repeat(80).trim()}`
+  ).join("\n\n");
+
+  it("caps ancestor content at summary budget in formatLookupResult", () => {
+    const doc = makeDoc({ contentBody: "Primary doc content." });
+    const ancestor = makeDoc({ id: "parent", contentBody: longContent });
+    const result = formatLookupResult(doc, [ancestor], [], "full");
+    // Primary should have full content
+    expect(result).toContain("Primary doc content.");
+    // Ancestor should be truncated (summary budget = 40 words) — not all sections
+    expect(result).toContain("[Sections omitted:");
+  });
+
+  it("caps ancestor content at summary budget in formatBatchLookupResult", () => {
+    const doc = makeDoc({ contentBody: "Primary doc content." });
+    const ancestor = makeDoc({ id: "parent", contentBody: longContent });
+    const result = formatBatchLookupResult([doc], [ancestor], [], "full");
+    expect(result).toContain("Primary doc content.");
+    expect(result).toContain("[Sections omitted:");
   });
 });

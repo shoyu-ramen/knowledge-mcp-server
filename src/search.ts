@@ -27,6 +27,9 @@ export interface SearchOptions {
   maxResults?: number;
   detailLevel?: DetailLevel;
   includeDrafts?: boolean;
+  includeAncestors?: boolean;
+  includeFacets?: boolean;
+  verbose?: boolean;
 }
 
 interface ScoredDoc {
@@ -225,25 +228,28 @@ function expandResults(
   queryVector: number[] | null,
   query: string,
   maxRelated: number,
-  searchMethod: string
+  searchMethod: string,
+  includeAncestors: boolean
 ): FormattedDoc[] {
   const seen = new Set<string>();
   const formattedDocs: FormattedDoc[] = [];
 
-  // 4a: Collect unique ancestors (never dropped)
-  const ancestorDocs: KnowledgeDocument[] = [];
-  for (const { doc } of topResults) {
-    const ancestors = getAncestors(graph, doc.id);
-    for (const a of ancestors) {
-      if (!seen.has(a.id)) {
-        seen.add(a.id);
-        ancestorDocs.push(a);
+  // 4a: Collect unique ancestors (opt-in)
+  if (includeAncestors) {
+    const ancestorDocs: KnowledgeDocument[] = [];
+    for (const { doc } of topResults) {
+      const ancestors = getAncestors(graph, doc.id);
+      for (const a of ancestors) {
+        if (!seen.has(a.id)) {
+          seen.add(a.id);
+          ancestorDocs.push(a);
+        }
       }
     }
-  }
 
-  for (const a of ancestorDocs) {
-    formattedDocs.push({ doc: a, relevance: "ancestor" });
+    for (const a of ancestorDocs) {
+      formattedDocs.push({ doc: a, relevance: "ancestor" });
+    }
   }
 
   // Primary results (with annotations)
@@ -330,7 +336,7 @@ export interface SearchResult {
   searchMethod: string;
   confidence: "high" | "medium" | "low";
   results: FormattedDoc[];
-  facets: FacetCounts;
+  facets?: FacetCounts;
   ms: number;
 }
 
@@ -356,10 +362,11 @@ export async function knowledgeSearch(
   return formatSearchResults(
     result.query,
     result.results,
-    options.detailLevel || "normal",
+    options.detailLevel || "summary",
     result.searchMethod,
     result.facets,
-    result.confidence
+    result.confidence,
+    options.verbose ?? false
   );
 }
 
@@ -371,7 +378,7 @@ async function searchCore(
   knowledgeDir?: string
 ): Promise<SearchResult> {
   const maxResults = options.maxResults || 10;
-  const _detailLevel = options.detailLevel || "normal";
+  const _detailLevel = options.detailLevel || "summary";
   const searchStart = Date.now();
 
   // Stage 1: Classify query
@@ -409,7 +416,7 @@ async function searchCore(
   switch (queryType) {
     case "broad":
       topN = Math.min(4, scored.length);
-      maxRelated = 2;
+      maxRelated = 1;
       break;
     case "decision":
       topN = Math.min(3, scored.length);
@@ -417,16 +424,16 @@ async function searchCore(
       break;
     case "procedural":
       topN = Math.min(5, scored.length);
-      maxRelated = 2;
+      maxRelated = 1;
       break;
     case "troubleshooting":
       topN = Math.min(5, scored.length);
-      maxRelated = 1;
+      maxRelated = 0;
       break;
     case "specific":
     default:
       topN = Math.min(6, scored.length);
-      maxRelated = 3;
+      maxRelated = 1;
       break;
   }
 
@@ -442,21 +449,25 @@ async function searchCore(
     queryVector,
     options.query,
     maxRelated,
-    searchMethod
+    searchMethod,
+    options.includeAncestors ?? false
   );
 
-  // Compute facets from all scored candidates (not just top-N)
-  const facets: FacetCounts = {
-    domains: new Map(),
-    types: new Map(),
-    phases: new Map(),
-  };
-  for (const { doc } of scored) {
-    facets.domains.set(doc.domain, (facets.domains.get(doc.domain) || 0) + 1);
-    facets.types.set(doc.type, (facets.types.get(doc.type) || 0) + 1);
-    for (const p of doc.phase) {
-      const key = `phase-${p}`;
-      facets.phases.set(key, (facets.phases.get(key) || 0) + 1);
+  // Compute facets from all scored candidates (opt-in)
+  let facets: FacetCounts | undefined;
+  if (options.includeFacets) {
+    facets = {
+      domains: new Map(),
+      types: new Map(),
+      phases: new Map(),
+    };
+    for (const { doc } of scored) {
+      facets.domains.set(doc.domain, (facets.domains.get(doc.domain) || 0) + 1);
+      facets.types.set(doc.type, (facets.types.get(doc.type) || 0) + 1);
+      for (const p of doc.phase) {
+        const key = `phase-${p}`;
+        facets.phases.set(key, (facets.phases.get(key) || 0) + 1);
+      }
     }
   }
 

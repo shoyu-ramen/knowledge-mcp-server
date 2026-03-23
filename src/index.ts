@@ -67,20 +67,51 @@ export function createKnowledgeServer(knowledgeDir: string): KnowledgeServerResu
         .default(10)
         .describe("Maximum number of documents to return (default 10)"),
       detail_level: z
-        .enum(["summary", "normal", "full"])
+        .enum(["compact", "summary", "normal", "full"])
         .optional()
-        .default("normal")
+        .default("summary")
         .describe(
-          'Content detail level: "summary" (~40-500 words per doc), "normal" (~80-1500 words, default), "full" (no truncation)'
+          'Content detail level: "compact" (~200 words, metadata only for ancestors/related), "summary" (~40-500 words, default), "normal" (~80-1500 words), "full" (no truncation)'
         ),
       include_drafts: z
         .boolean()
         .optional()
         .default(false)
         .describe("Include draft documents in results (default false)"),
+      include_ancestors: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include ancestor (parent summary) documents in results (default false)"),
+      include_facets: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Include facet counts (domain/type/phase distribution) in results (default false)"
+        ),
+      verbose: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Include debug metadata (similarity scores, match fields, file paths) in results (default false)"
+        ),
     },
     { readOnlyHint: true },
-    async ({ query, domains, phases, tags, type, max_results, detail_level, include_drafts }) => {
+    async ({
+      query,
+      domains,
+      phases,
+      tags,
+      type,
+      max_results,
+      detail_level,
+      include_drafts,
+      include_ancestors,
+      include_facets,
+      verbose,
+    }) => {
       const result = await engine.search({
         query,
         domains,
@@ -90,6 +121,9 @@ export function createKnowledgeServer(knowledgeDir: string): KnowledgeServerResu
         maxResults: max_results,
         detailLevel: detail_level,
         includeDrafts: include_drafts,
+        includeAncestors: include_ancestors,
+        includeFacets: include_facets,
+        verbose,
       });
       return { content: [{ type: "text" as const, text: result }] };
     }
@@ -116,10 +150,12 @@ export function createKnowledgeServer(knowledgeDir: string): KnowledgeServerResu
         .default(false)
         .describe("Include related documents (default false)"),
       content: z
-        .enum(["full", "summary"])
+        .enum(["full", "summary", "compact"])
         .optional()
         .default("full")
-        .describe('Content level: "full" (complete content, default) or "summary" (truncated)'),
+        .describe(
+          'Content level: "full" (complete content, default), "summary" (truncated), or "compact" (~200 words, metadata only for ancestors)'
+        ),
     },
     { readOnlyHint: true },
     async ({ id, include_ancestors, include_related, content }) => {

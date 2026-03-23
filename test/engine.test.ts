@@ -145,6 +145,48 @@ Root.`,
       });
       expect(result).toContain("Audio Processing");
     });
+
+    it("defaults to summary detail level", async () => {
+      createFixtures(tmpDir);
+      const engine = new KnowledgeEngine(tmpDir);
+
+      const summaryResult = await engine.search({ query: "audio" });
+      const normalResult = await engine.search({ query: "audio", detailLevel: "normal" });
+      // Normal returns more content than the default (summary)
+      expect(normalResult.length).toBeGreaterThanOrEqual(summaryResult.length);
+    });
+
+    it("excludes ancestors by default", async () => {
+      createFixtures(tmpDir);
+      const engine = new KnowledgeEngine(tmpDir);
+
+      const result = await engine.search({ query: "audio" });
+      expect(result).not.toContain('relevance="ancestor"');
+    });
+
+    it("includes ancestors when requested", async () => {
+      createFixtures(tmpDir);
+      const engine = new KnowledgeEngine(tmpDir);
+
+      const result = await engine.search({ query: "audio", includeAncestors: true });
+      expect(result).toContain('relevance="ancestor"');
+    });
+
+    it("excludes facets by default", async () => {
+      createFixtures(tmpDir);
+      const engine = new KnowledgeEngine(tmpDir);
+
+      const result = await engine.search({ query: "audio" });
+      expect(result).not.toContain("<facets>");
+    });
+
+    it("includes facets when requested", async () => {
+      createFixtures(tmpDir);
+      const engine = new KnowledgeEngine(tmpDir);
+
+      const result = await engine.search({ query: "audio", includeFacets: true });
+      expect(result).toContain("<facets>");
+    });
   });
 
   // -----------------------------------------------------------------------

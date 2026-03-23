@@ -1,6 +1,6 @@
 import type { KnowledgeDocument } from "./loader.js";
 
-export type DetailLevel = "summary" | "normal" | "full";
+export type DetailLevel = "compact" | "summary" | "normal" | "full";
 
 interface FormattedDoc {
   doc: KnowledgeDocument;
@@ -13,6 +13,7 @@ interface FormattedDoc {
 
 // Word budgets per relevance tier and detail level
 const WORD_BUDGETS: Record<DetailLevel, Record<FormattedDoc["relevance"], number>> = {
+  compact: { ancestor: 0, "graph-expanded": 0, primary: 200 },
   summary: { ancestor: 40, "graph-expanded": 150, primary: 500 },
   normal: { ancestor: 80, "graph-expanded": 300, primary: 1500 },
   full: { ancestor: Infinity, "graph-expanded": Infinity, primary: Infinity },
@@ -138,7 +139,11 @@ function escapeXml(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function formatSingleDoc(entry: FormattedDoc, detailLevel: DetailLevel): string {
+function formatSingleDoc(
+  entry: FormattedDoc,
+  detailLevel: DetailLevel,
+  verbose: boolean = false
+): string {
   const { doc, relevance, similarity, matchedOn, scoringMethod, expandedFrom } = entry;
   const attrs = [`id="${escapeXml(doc.id)}"`, `type="${doc.type}"`, `relevance="${relevance}"`];
   if (doc.status !== "active") {
@@ -147,19 +152,21 @@ function formatSingleDoc(entry: FormattedDoc, detailLevel: DetailLevel): string 
   if (doc.supersededBy) {
     attrs.push(`superseded_by="${escapeXml(doc.supersededBy)}"`);
   }
-  if (similarity !== undefined) {
-    attrs.push(`similarity="${similarity.toFixed(2)}"`);
+  if (verbose) {
+    if (similarity !== undefined) {
+      attrs.push(`similarity="${similarity.toFixed(2)}"`);
+    }
+    if (matchedOn) {
+      attrs.push(`matched_on="${escapeXml(matchedOn)}"`);
+    }
+    if (scoringMethod) {
+      attrs.push(`scoring_method="${escapeXml(scoringMethod)}"`);
+    }
+    if (expandedFrom) {
+      attrs.push(`expanded_from="${escapeXml(expandedFrom)}"`);
+    }
+    attrs.push(`path="${escapeXml(doc.filePath)}"`);
   }
-  if (matchedOn) {
-    attrs.push(`matched_on="${escapeXml(matchedOn)}"`);
-  }
-  if (scoringMethod) {
-    attrs.push(`scoring_method="${escapeXml(scoringMethod)}"`);
-  }
-  if (expandedFrom) {
-    attrs.push(`expanded_from="${escapeXml(expandedFrom)}"`);
-  }
-  attrs.push(`path="${escapeXml(doc.filePath)}"`);
 
   const parts = [`  <document ${attrs.join(" ")}>`];
   parts.push(`    <title>${escapeXml(doc.title)}</title>`);
@@ -187,8 +194,10 @@ function formatSingleDoc(entry: FormattedDoc, detailLevel: DetailLevel): string 
   }
 
   const budget = WORD_BUDGETS[detailLevel][relevance];
-  const content = truncateContent(doc.contentBody, budget);
-  parts.push(`    <content>\n${content}\n    </content>`);
+  if (budget > 0) {
+    const content = truncateContent(doc.contentBody, budget);
+    parts.push(`    <content>\n${content}\n    </content>`);
+  }
   parts.push(`  </document>`);
 
   return parts.join("\n");
@@ -221,7 +230,8 @@ export function formatSearchResults(
   detailLevel: DetailLevel = "normal",
   searchMethod?: string,
   facets?: FacetCounts,
-  confidence?: "high" | "medium" | "low"
+  confidence?: "high" | "medium" | "low",
+  verbose: boolean = false
 ): string {
   const methodAttr = searchMethod ? ` search_method="${escapeXml(searchMethod)}"` : "";
   const confidenceAttr = confidence ? ` confidence="${confidence}"` : "";
@@ -240,7 +250,7 @@ export function formatSearchResults(
   const expanded = results.filter((r) => r.relevance === "graph-expanded");
 
   for (const entry of [...ancestors, ...primaries, ...expanded]) {
-    parts.push(formatSingleDoc(entry, detailLevel));
+    parts.push(formatSingleDoc(entry, detailLevel, verbose));
   }
 
   parts.push(`</knowledge_context>`);
@@ -251,23 +261,26 @@ export function formatBatchLookupResult(
   docs: KnowledgeDocument[],
   ancestors: KnowledgeDocument[],
   related: KnowledgeDocument[],
-  contentLevel: "full" | "summary" = "full"
+  contentLevel: "full" | "summary" | "compact" = "full",
+  verbose: boolean = false
 ): string {
-  const detailLevel: DetailLevel = contentLevel === "summary" ? "normal" : "full";
+  const detailLevel: DetailLevel =
+    contentLevel === "compact" ? "compact" : contentLevel === "summary" ? "normal" : "full";
   const parts = [
     `<knowledge_context total_docs="${docs.length + ancestors.length + related.length}">`,
   ];
 
+  // Ancestors always capped at "summary" budget (40 words) — the user asked for specific docs
   for (const a of ancestors) {
-    parts.push(formatSingleDoc({ doc: a, relevance: "ancestor" }, detailLevel));
+    parts.push(formatSingleDoc({ doc: a, relevance: "ancestor" }, "summary", verbose));
   }
 
   for (const doc of docs) {
-    parts.push(formatSingleDoc({ doc, relevance: "primary" }, detailLevel));
+    parts.push(formatSingleDoc({ doc, relevance: "primary" }, detailLevel, verbose));
   }
 
   for (const r of related) {
-    parts.push(formatSingleDoc({ doc: r, relevance: "graph-expanded" }, detailLevel));
+    parts.push(formatSingleDoc({ doc: r, relevance: "graph-expanded" }, detailLevel, verbose));
   }
 
   parts.push(`</knowledge_context>`);
@@ -278,19 +291,22 @@ export function formatLookupResult(
   doc: KnowledgeDocument,
   ancestors: KnowledgeDocument[],
   related: KnowledgeDocument[],
-  contentLevel: "full" | "summary" = "full"
+  contentLevel: "full" | "summary" | "compact" = "full",
+  verbose: boolean = false
 ): string {
-  const detailLevel: DetailLevel = contentLevel === "summary" ? "normal" : "full";
+  const detailLevel: DetailLevel =
+    contentLevel === "compact" ? "compact" : contentLevel === "summary" ? "normal" : "full";
   const parts = [`<knowledge_context total_docs="${1 + ancestors.length + related.length}">`];
 
+  // Ancestors always capped at "summary" budget (40 words) — the user asked for a specific doc
   for (const a of ancestors) {
-    parts.push(formatSingleDoc({ doc: a, relevance: "ancestor" }, detailLevel));
+    parts.push(formatSingleDoc({ doc: a, relevance: "ancestor" }, "summary", verbose));
   }
 
-  parts.push(formatSingleDoc({ doc, relevance: "primary" }, detailLevel));
+  parts.push(formatSingleDoc({ doc, relevance: "primary" }, detailLevel, verbose));
 
   for (const r of related) {
-    parts.push(formatSingleDoc({ doc: r, relevance: "graph-expanded" }, detailLevel));
+    parts.push(formatSingleDoc({ doc: r, relevance: "graph-expanded" }, detailLevel, verbose));
   }
 
   parts.push(`</knowledge_context>`);

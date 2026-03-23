@@ -165,6 +165,9 @@ export class KnowledgeEngine {
         maxResults: options.maxResults,
         detailLevel: options.detailLevel,
         includeDrafts: options.includeDrafts,
+        includeAncestors: options.includeAncestors,
+        includeFacets: options.includeFacets,
+        verbose: options.verbose,
       },
       this.classifierConfig,
       this.knowledgeDir

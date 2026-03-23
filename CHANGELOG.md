@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.1
+
+### Added
+- "compact" detail level for search and lookup — ~200 words per primary result, metadata only for ancestors/related
+- `include_ancestors` parameter for `knowledge_search` (default false) — ancestors now opt-in for search
+- `include_facets` parameter for `knowledge_search` (default false) — facets now opt-in
+- `verbose` parameter for `knowledge_search` (default false) — debug metadata (similarity, matched_on, scoring_method, path) now opt-in
+
+### Changed
+- Default `detail_level` for `knowledge_search` changed from "normal" to "summary" (~500 words vs ~1500 words per result)
+- Lookup ancestor content now capped at summary budget (40 words) regardless of content level
+- Reduced related-doc expansion limits (specific: 3→1, broad: 2→1, procedural: 2→1, troubleshooting: 1→0)
+
 ## 1.4.0
 
 ### Added
