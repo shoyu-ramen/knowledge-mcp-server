@@ -355,65 +355,6 @@ export class KnowledgeEngine {
     return previewDelete(this.graph, id);
   }
 
-  /** Write multiple documents in sequence, sharing a single queue slot. */
-  async bulkWrite(paramsList: WriteParams[]): Promise<WriteResult[]> {
-    return this.enqueueWrite(async () => {
-      const results: WriteResult[] = [];
-      for (const params of paramsList) {
-        const result = writeDocument(
-          this.graph,
-          this.tfidfIndex,
-          this.knowledgeDir,
-          params,
-          this.validDomains,
-          this.validPhaseIds
-        );
-        this.tfidfIndex = result.tfidfIndex;
-        results.push(result);
-      }
-      log.info("bulk_write", { count: paramsList.length });
-      return results;
-    });
-  }
-
-  /** Detect knowledge gaps: sparse domains, missing cross-links, underserved tags. */
-  detectGaps(): {
-    sparseDomains: Array<{ domain: string; count: number }>;
-    isolatedClusters: string[];
-    underTagged: string[];
-  } {
-    const domainCounts = new Map<string, number>();
-    const isolatedClusters: string[] = [];
-    const underTagged: string[] = [];
-
-    for (const doc of this.graph.documents.values()) {
-      domainCounts.set(doc.domain, (domainCounts.get(doc.domain) || 0) + 1);
-
-      // Isolated: no related links in or out
-      const backlinks = this.graph.backlinkIndex.get(doc.id);
-      if (
-        doc.related.length === 0 &&
-        (!backlinks || backlinks.size === 0) &&
-        doc.type !== "summary"
-      ) {
-        isolatedClusters.push(doc.id);
-      }
-
-      // Under-tagged: fewer than 2 tags
-      if (doc.tags.length < 2 && doc.type !== "summary") {
-        underTagged.push(doc.id);
-      }
-    }
-
-    // Sparse domains: fewer than 3 docs
-    const sparseDomains = [...domainCounts.entries()]
-      .filter(([, count]) => count < 3)
-      .map(([domain, count]) => ({ domain, count }))
-      .sort((a, b) => a.count - b.count);
-
-    return { sparseDomains, isolatedClusters, underTagged };
-  }
-
   // --- Internal ---
 
   /** @internal Exposed for backward compatibility */

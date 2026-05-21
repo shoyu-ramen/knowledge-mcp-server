@@ -229,7 +229,8 @@ function expandResults(
   query: string,
   maxRelated: number,
   searchMethod: string,
-  includeAncestors: boolean
+  includeAncestors: boolean,
+  verbose: boolean
 ): FormattedDoc[] {
   const seen = new Set<string>();
   const formattedDocs: FormattedDoc[] = [];
@@ -260,7 +261,7 @@ function expandResults(
         doc,
         relevance: "primary",
         similarity: score,
-        matchedOn: detectMatchedOn(query, doc),
+        matchedOn: verbose ? detectMatchedOn(query, doc) : undefined,
         scoringMethod: searchMethod,
       });
     }
@@ -329,8 +330,7 @@ function expandResults(
   return formattedDocs;
 }
 
-/** Structured search result for programmatic consumers. */
-export interface SearchResult {
+interface SearchResult {
   query: string;
   queryType: string;
   searchMethod: string;
@@ -338,17 +338,6 @@ export interface SearchResult {
   results: FormattedDoc[];
   facets?: FacetCounts;
   ms: number;
-}
-
-/** Search returning structured data for programmatic use. */
-export async function knowledgeSearchStructured(
-  graph: KnowledgeGraph,
-  bm25Index: Bm25Index,
-  options: SearchOptions,
-  classifierConfig: ClassifierConfig,
-  knowledgeDir?: string
-): Promise<SearchResult> {
-  return searchCore(graph, bm25Index, options, classifierConfig, knowledgeDir);
 }
 
 export async function knowledgeSearch(
@@ -450,7 +439,8 @@ async function searchCore(
     options.query,
     maxRelated,
     searchMethod,
-    options.includeAncestors ?? false
+    options.includeAncestors ?? false,
+    options.verbose ?? false
   );
 
   // Compute facets from all scored candidates (opt-in)

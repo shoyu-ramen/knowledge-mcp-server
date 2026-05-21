@@ -367,13 +367,9 @@ export function formatWriteResult(result: {
     `Document ${result.status}: "${result.id}"`,
     `  File: ${result.filePath}`,
     `  Parent: ${result.parentId ?? "(root)"}`,
-    ``,
-    `BM25 search index updated — document is immediately searchable.`,
-    `Note: Embedding vectors update automatically using the configured embedding provider.`,
   ];
   if (result.warnings && result.warnings.length > 0) {
-    lines.push(``);
-    lines.push(`Warnings:`);
+    lines.push(``, `Warnings:`);
     for (const w of result.warnings) {
       lines.push(`  - ${w}`);
     }
@@ -382,10 +378,9 @@ export function formatWriteResult(result: {
 }
 
 export function formatDeleteResult(result: { id: string; warnings: string[] }): string {
-  const lines = [`Document deleted: "${result.id}"`, ``, `BM25 search index updated.`];
+  const lines = [`Document deleted: "${result.id}"`];
   if (result.warnings.length > 0) {
-    lines.push(``);
-    lines.push(`Warnings:`);
+    lines.push(``, `Warnings:`);
     for (const w of result.warnings) {
       lines.push(`  - ${w}`);
     }

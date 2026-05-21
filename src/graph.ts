@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type KnowledgeDocument, loadDocuments, loadDocumentsAsync } from "./loader.js";
+import { type KnowledgeDocument, loadDocuments } from "./loader.js";
 import { loadEmbeddings, type EmbeddingsStore } from "./embeddings.js";
 import { log } from "./logger.js";
 
@@ -111,40 +111,6 @@ export function loadTagTaxonomy(knowledgeDir: string): TagTaxonomy | null {
 export function buildGraph(knowledgeDir: string, validDomains?: string[] | null): KnowledgeGraph {
   const loaderWarnings: string[] = [];
   const documents = loadDocuments(knowledgeDir, validDomains, loaderWarnings);
-  const embeddings = loadEmbeddings(knowledgeDir);
-
-  const tagIndex = buildTagIndex(documents);
-  const domainIndex = buildDomainIndex(documents);
-  const phaseIndex = buildPhaseIndex(documents);
-  const typeIndex = buildTypeIndex(documents);
-  const backlinkIndex = buildBacklinkIndex(documents);
-  const filePathIndex = new Map<string, string>();
-  for (const doc of documents.values()) {
-    filePathIndex.set(doc.filePath, doc.id);
-  }
-  const tagTaxonomy = loadTagTaxonomy(knowledgeDir);
-
-  return {
-    documents,
-    embeddings,
-    tagIndex,
-    domainIndex,
-    phaseIndex,
-    typeIndex,
-    backlinkIndex,
-    filePathIndex,
-    loaderWarnings,
-    tagTaxonomy,
-  };
-}
-
-/** Async variant of buildGraph — reads files concurrently for large knowledge bases. */
-export async function buildGraphAsync(
-  knowledgeDir: string,
-  validDomains?: string[] | null
-): Promise<KnowledgeGraph> {
-  const loaderWarnings: string[] = [];
-  const documents = await loadDocumentsAsync(knowledgeDir, validDomains, loaderWarnings);
   const embeddings = loadEmbeddings(knowledgeDir);
 
   const tagIndex = buildTagIndex(documents);
