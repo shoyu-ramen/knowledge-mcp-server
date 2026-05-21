@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.5.0
+
+### Removed
+- `loadDocumentsAsync` and `buildGraphAsync` — unused async variants of the sync loaders
+- `knowledgeSearchStructured` — unused export, callers use `knowledgeSearch`
+- `KnowledgeEngine.bulkWrite` and `KnowledgeEngine.detectGaps` — undocumented methods with no callers
+
+### Changed
+- MCP tool descriptions compressed across all 8 tools to reduce per-session token cost
+- `detectMatchedOn` is now skipped unless `verbose=true` (it was tokenizing 2000 chars per primary result for a field only emitted in verbose mode)
+- `formatWriteResult` and `formatDeleteResult` no longer include the "BM25 search index updated / Embedding vectors update automatically" boilerplate
+
 ## 1.4.1
 
 ### Added
