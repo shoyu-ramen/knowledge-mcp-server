@@ -71,6 +71,16 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Wait until predicate returns true, polling every 50ms.
+// Debounce is 500ms; cap at 3s to absorb parallel-test load without flaking.
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) return;
+    await delay(50);
+  }
+}
+
 describe("File Watcher", () => {
   let tmpDir: string;
   let engine: KnowledgeEngine;
@@ -118,6 +128,7 @@ describe("File Watcher", () => {
 
     it("detects new file creation after debounce", async () => {
       engine.watch();
+      await delay(100); // let FSEvents subscription attach before writing
       const initialCount = engine.graph.documents.size;
 
       writeFileSync(
@@ -134,8 +145,7 @@ phase: [1]
 Brand new content.`
       );
 
-      // Wait for debounce (500ms) + processing time
-      await delay(1000);
+      await waitFor(() => engine.graph.documents.has("technology/new-doc"));
 
       expect(engine.graph.documents.size).toBe(initialCount + 1);
       expect(engine.graph.documents.has("technology/new-doc")).toBe(true);
@@ -147,6 +157,7 @@ Brand new content.`
 
     it("detects file modification after debounce", async () => {
       engine.watch();
+      await delay(100);
       const audioDoc = engine.graph.documents.get("technology/audio");
       expect(audioDoc).toBeDefined();
       expect(audioDoc!.title).toBe("Audio Processing");
@@ -165,7 +176,9 @@ phase: [1]
 Updated audio content.`
       );
 
-      await delay(1000);
+      await waitFor(
+        () => engine.graph.documents.get("technology/audio")?.title === "Updated Audio Processing"
+      );
 
       const updatedDoc = engine.graph.documents.get("technology/audio");
       expect(updatedDoc).toBeDefined();
@@ -175,13 +188,14 @@ Updated audio content.`
 
     it("detects file deletion after debounce", async () => {
       engine.watch();
+      await delay(100);
       expect(engine.graph.documents.has("technology/audio")).toBe(true);
       const audioDoc = engine.graph.documents.get("technology/audio")!;
       const filePath = audioDoc.filePath;
 
       unlinkSync(join(tmpDir, "technology", "audio.md"));
 
-      await delay(1000);
+      await waitFor(() => !engine.graph.documents.has("technology/audio"));
 
       expect(engine.graph.documents.has("technology/audio")).toBe(false);
       expect(engine.graph.filePathIndex.has(filePath)).toBe(false);
@@ -189,6 +203,7 @@ Updated audio content.`
 
     it("batches rapid changes via debounce", async () => {
       engine.watch();
+      await delay(100);
 
       // Create multiple files in rapid succession
       for (let i = 0; i < 3; i++) {
@@ -207,8 +222,12 @@ Batch content ${i}.`
         );
       }
 
-      // All should be processed in one batch after debounce
-      await delay(1000);
+      await waitFor(
+        () =>
+          engine.graph.documents.has("technology/batch-0") &&
+          engine.graph.documents.has("technology/batch-1") &&
+          engine.graph.documents.has("technology/batch-2")
+      );
 
       for (let i = 0; i < 3; i++) {
         expect(engine.graph.documents.has(`technology/batch-${i}`)).toBe(true);
